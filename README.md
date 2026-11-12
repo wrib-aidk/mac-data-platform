@@ -69,13 +69,6 @@ PDF·XML 원본은 파일로 두고, 표 데이터·문서 목록·텍스트는 
 > 그래서 링크 파일명이 같다고 건너뛰지 않고 매번 받아서 비교하며, 날짜가 더 이른 판으로는 덮어쓰지 않습니다.
 > HF 에서 가져온 문서 중에도 예전 판이 섞여 있을 수 있는데, 다음 수집에서 새 판을 받으면 자동으로 교체됩니다.
 
-### Hugging Face 에서 가져온 데이터
-
-`scripts/import_hf.py` 로 Won1026 데이터셋(`krx-quotes-raw`, `krx-quotes`, `mics`)을 위 구조로 옮겼습니다.
-SEIBro NAV 는 HF 의 `<ISIN>_<시작>_<끝>.csv`(API 원본 컬럼명)를 파이프라인 형식(`funds/<ISIN>/nav.csv`, `date, nav …`)으로 바꿨고,
-PDF→텍스트 결과(`.md`)는 추출 결과라서 `data/extracted/` 에 두었습니다. KRX 시세 정제본(`krx-quotes`)은 정제 파이프라인을 새로 정할 예정이라 가져왔다가 삭제했습니다 (HF 에 원본 있음).
-`mics/fundsupermarket_fund_list.csv` 는 DRM 암호화돼 있어 건너뛰었습니다 (파이프라인이 목록을 새로 받음).
-- 원본 스크립트 중 `krx/upload_hf_dataset.py`(HF 업로드)는 옮기지 않았습니다.
 
 ## 추출 파이프라인
 
@@ -83,7 +76,6 @@ PDF→텍스트 결과(`.md`)는 추출 결과라서 `data/extracted/` 에 두�
 | --- | --- | --- |
 | `fundsupermarket/fund_documents_text` | 공시 PDF → 텍스트 `.md` (원본 `convert_pdf_to_txt.py`, 결과가 HF 의 `.md` 와 같음) | `fundsupermarket` job 에서 `fund_details` 다음에 실행. 바뀐 PDF 만 다시 변환 (`.text.json`) |
 
-일부 PDF(예: `K55101BK6869/key_summary_explanation.pdf`)는 원본부터 깨져 있어 변환되지 않습니다 (HF 에도 `.md` 없음). `ITEM_FAILED` 로 남습니다.
 
 ### UI 에서 결과 미리보기
 
@@ -92,8 +84,6 @@ asset 화면의 메타데이터에 **preview** 항목이 있습니다.
 - `fundsupermarket/fund_details`: 펀드 1개의 파일 목록과 `details.json` 앞부분
 - `seibro/fund_nav`: 펀드 1개의 `nav.csv` 앞 5행
 - `fundsupermarket/fund_documents_text`: 펀드 1개의 문서별 글자 수와 간이투자설명서 앞부분
-- KRX 정제 parquet: 행 수, 컬럼 목록(**Columns** 탭), 앞 5행
-
 미리보기는 실행할 때 만들어지므로 한 번이라도 실행한 asset 에만 보입니다 (KRX parquet 은 코드 로드 때 읽음).
 
 ## PostgreSQL
@@ -101,26 +91,13 @@ asset 화면의 메타데이터에 **preview** 항목이 있습니다.
 | 스키마 | 내용 |
 | --- | --- |
 | `raw` | 수집 파일을 그대로 옮긴 테이블 (숫자·날짜만 타입 변환, 구조가 자주 바뀌는 응답은 `data jsonb`) |
-| `extracted` | 추출 결과 (공시 텍스트 …). KRX 정제본은 정제 파이프라인이 정해지면 추가 |
+| `extracted` | 추출 결과 (공시 텍스트 …).  |
 | `etl` | `schema_migrations`(적용된 sql 파일), `loaded_files`(파일별 적재 지문) |
 
-| 테이블 | 키 | 원본 |
-| --- | --- | --- |
-| `raw.fundsupermarket_fund_list` | snapshot_date, fund_code | `fund_list.csv` — 수집일별 스냅샷, **365일 보존** |
-| `raw.fundsupermarket_fund_details` | fund_code, snapshot_date | `details.json` — 수집일별 스냅샷, **365일 보존** |
-| `raw.fundsupermarket_documents` | fund_code, doc_type | PDF 목록 (경로·크기·문서 기준일) |
-| `raw.seibro_funds` / `raw.seibro_fund_nav` | isin / isin, date | SEIBro 목록 / NAV |
-| `raw.kofia_fund_nav` | fund_code, date | KOFIA NAV |
-| `raw.kofia_holdings`, `raw.kofia_funds` | std_dt, standard_cd, line_no | `kofia_holdings.db` |
-| `raw.dart_corps` / `raw.dart_filings` | corp_code / corp_code, 결산기, 보고서 | 회사 목록 / XML 파일 목록 |
-| `raw.krx_stock_list`, `raw.krx_stock_daily`, `raw.krx_etf_daily`, `raw.krx_etf_constituents` | … | KRX 원본 CSV |
-| `extracted.fundsupermarket_document_text` | fund_code, doc_type | 공시 텍스트 `.md` |
 
 - **증분 적재**: 파일 크기·수정시각을 `etl.loaded_files` 에 기록해 바뀐 파일만 그 단위(펀드·날짜)로 지우고 다시 넣습니다. 중간에 끊겨도 다음 실행 때 이어서 넣음.
-- 각 수집 job 끝에 해당 적재 asset 이 붙어 있어 스케줄 수집 후 자동으로 DB 에 반영됩니다. 파일만 다시 넣으려면 `db_load_all` job (전부 다시: asset 설정 `force: true`).
-- 스냅샷 보존 기간: `config/pipelines.yaml` 의 `db.retention_days`
 - 테이블 추가/변경: `sql/002_xxx.sql` 처럼 **새 파일**을 추가 (다음 연결 때 번호 순으로 한 번만 실행). 기존 sql 파일은 고치지 않음
-- 접속: `docker compose exec postgres psql -U platform -d platform` 또는 DB 툴로 `127.0.0.1:5432` (이 PC 에서만 열림)
+- 접속: `docker compose exec postgres psql -U platform -d platform` 또는 DB 툴로 `127.0.0.1:5432`
 - 백업/이전: `./scripts/db_backup.sh dump` → 새 PC 에서 `docker compose up -d` 후 `./scripts/db_backup.sh restore <파일>`
 
 ## 추출 파이프라인 추가하기 (처음 하는 사람용)
