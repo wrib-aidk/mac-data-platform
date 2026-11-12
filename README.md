@@ -51,17 +51,18 @@ PDF·XML 원본은 파일로 두고, 표 데이터·문서 목록·텍스트는 
 | krx_open_api | `krx/stock_list`, `stock_daily_quotes`, `etf_daily_quotes` | `data/raw/krx/stock_list.csv`, `data/raw/krx/quotes/` | `KRX_AUTH_KEY` |
 | krx_web | `krx/etf_constituents` | `data/raw/krx/etf_constituents/<YYYYMMDD>/` | `KRX_AUTH_ID/PW` |
 
-### 갱신 규칙 — 소스별 폴더에 항상 최신본 하나
+### 갱신 규칙 — 파일은 최신본만, 이력은 DB 에
 
-| 데이터 | 갱신 방법 |
-| --- | --- |
-| 목록 (`fund_list.csv`, `corp_list.csv`, `stock_list.csv`) | 매번 새로 받아 덮어씀. 목록에서 빠진 펀드의 폴더는 지우지 않음 |
-| 펀드 `details.json` | 매번 새로 받아 덮어씀 (수익률·규모가 계속 바뀜) |
-| 문서 PDF 6종 | 매번 받아 **본문 텍스트**를 비교해서 달라졌을 때만 덮어씀. 단, 문서 안 날짜(작성기준일·운용기간·심사필·부칙 시행일)가 기존보다 이르면 무시 |
-| NAV (`nav.csv`) | 마지막 날짜 7일 전부터 다시 받아 날짜 기준으로 합침 (새 날짜 추가, 정정값 덮어씀) |
-| DART 정기보고서 | 같은 회사·결산기·보고서의 정정본이 나오면 이전 판 파일을 지우고 교체 |
-| KRX 일별 시세 | 날짜별 파일이라 이미 받은 날은 건너뜀 (기본 최근 100일 범위) |
-| KOFIA 보유종목 | 운용사 영업보고서 정정(seq 증가) 시 해당 펀드 행 교체 (원본 로직) |
+다시 수집하면 `data/raw/` 의 파일을 새로 만들지 않고 기존 파일을 고칩니다. 덮어쓰기 전 값은 같은 job 안에서 먼저 DB 에 들어가 있습니다.
+
+| 데이터 | 파일 (`data/raw/`) | DB |
+| --- | --- | --- |
+| 목록·펀드 `details.json` | 매번 덮어씀 (최신본만) | 수집일별 스냅샷으로 쌓음, `db.retention_days`(365일) 지나면 삭제 |
+| NAV `nav.csv` | 날짜가 계속 쌓임. 마지막 날짜 7일 전부터 다시 받아 정정값 반영 | 전체 이력 |
+| KRX 일별 시세 | 날짜별 파일이 쌓임. 이미 받은 날은 건너뜀 | 전체 이력 |
+| 공시 PDF 6종 | 본문이 바뀌었을 때만 덮어씀. 문서 날짜가 기존보다 이르면 무시 | 최신 판만 |
+| DART 정기보고서 | 정정본이 나오면 교체 | 최신 판만 |
+| KOFIA 보유종목 | 정정(seq 증가) 시 해당 펀드 교체 | 최신 판만 |
 
 문서별 날짜·본문 해시·링크 파일명·갱신일은 `funds/<코드>/.docs.json` 에 기록되고, 실행 메타데이터에 `docs_new`/`docs_updated`/`docs_stale_ignored` 건수가 표시됩니다.
 
@@ -69,13 +70,11 @@ PDF·XML 원본은 파일로 두고, 표 데이터·문서 목록·텍스트는 
 > 그래서 링크 파일명이 같다고 건너뛰지 않고 매번 받아서 비교하며, 날짜가 더 이른 판으로는 덮어쓰지 않습니다.
 > HF 에서 가져온 문서 중에도 예전 판이 섞여 있을 수 있는데, 다음 수집에서 새 판을 받으면 자동으로 교체됩니다.
 
-
 ## 추출 파이프라인
 
 | asset | 내용 | 상태 |
 | --- | --- | --- |
 | `fundsupermarket/fund_documents_text` | 공시 PDF → 텍스트 `.md` (원본 `convert_pdf_to_txt.py`, 결과가 HF 의 `.md` 와 같음) | `fundsupermarket` job 에서 `fund_details` 다음에 실행. 바뀐 PDF 만 다시 변환 (`.text.json`) |
-
 
 ### UI 에서 결과 미리보기
 
@@ -84,19 +83,19 @@ asset 화면의 메타데이터에 **preview** 항목이 있습니다.
 - `fundsupermarket/fund_details`: 펀드 1개의 파일 목록과 `details.json` 앞부분
 - `seibro/fund_nav`: 펀드 1개의 `nav.csv` 앞 5행
 - `fundsupermarket/fund_documents_text`: 펀드 1개의 문서별 글자 수와 간이투자설명서 앞부분
-미리보기는 실행할 때 만들어지므로 한 번이라도 실행한 asset 에만 보입니다 (KRX parquet 은 코드 로드 때 읽음).
+
+미리보기는 실행할 때 만들어지므로 한 번이라도 실행한 asset 에만 보입니다.
 
 ## PostgreSQL
 
 | 스키마 | 내용 |
 | --- | --- |
 | `raw` | 수집 파일을 그대로 옮긴 테이블 (숫자·날짜만 타입 변환, 구조가 자주 바뀌는 응답은 `data jsonb`) |
-| `extracted` | 추출 결과 (공시 텍스트 …).  |
+| `extracted` | 추출 결과 (공시 텍스트 …) |
 | `etl` | `schema_migrations`(적용된 sql 파일), `loaded_files`(파일별 적재 지문) |
 
-
 - **증분 적재**: 파일 크기·수정시각을 `etl.loaded_files` 에 기록해 바뀐 파일만 그 단위(펀드·날짜)로 지우고 다시 넣습니다. 중간에 끊겨도 다음 실행 때 이어서 넣음.
-- 테이블 추가/변경: `sql/002_xxx.sql` 처럼 **새 파일**을 추가 (다음 연결 때 번호 순으로 한 번만 실행). 기존 sql 파일은 고치지 않음
+- 테이블 추가/변경: `sql/<다음 번호>_xxx.sql` **새 파일**을 추가 (다음 연결 때 번호 순으로 한 번만 실행). 기존 sql 파일은 고치지 않음
 - 접속: `docker compose exec postgres psql -U platform -d platform` 또는 DB 툴로 `127.0.0.1:5432`
 - 백업/이전: `./scripts/db_backup.sh dump` → 새 PC 에서 `docker compose up -d` 후 `./scripts/db_backup.sh restore <파일>`
 
@@ -135,7 +134,6 @@ from collections.abc import Iterable, Iterator
 from datetime import date
 from decimal import Decimal
 
-
 def daily_returns(rows: Iterable[tuple[str, date, Decimal | None]]) -> Iterator[tuple]:
     """rows: (종목코드, 날짜, 종가) — 종목코드·날짜 순으로 정렬돼 있어야 함.
 
@@ -173,7 +171,7 @@ CREATE TABLE extracted.krx_stock_returns (
   ALTER TABLE extracted.krx_stock_returns ADD COLUMN volume numeric;
   ```
 - 결과는 `extracted` 스키마, 수집 원본은 `raw` 스키마에 둡니다.
-- 입력으로 쓸 수 있는 테이블·컬럼은 위 [PostgreSQL](#postgresql) 표와 `sql/001_init.sql` 참고.
+- 입력으로 쓸 수 있는 테이블·컬럼은 `sql/001_init.sql` 참고 (또는 UI 에서 `db/raw/...` asset 의 **Columns** 탭).
 
 ### 3. asset 껍데기 — `src/mac_data_platform/defs/extract/krx_returns.py`
 
@@ -193,10 +191,8 @@ from ..resources import PostgresResource
 TABLE = "extracted.krx_stock_returns"                                  # ← 2번 테이블
 COLUMNS = ["isu_cd", "bas_dd", "close", "daily_return"]                # ← 1번 함수가 돌려주는 순서
 
-
 class ReturnsConfig(dg.Config):
     days: int = 30  # 실행 옵션 (UI Launchpad·pipelines.yaml 에서 바꿀 수 있음). 필요 없으면 삭제
-
 
 @db_asset(
     "extracted",                 # 스키마
