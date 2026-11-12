@@ -111,7 +111,7 @@ def _row_count(t: Table, conn) -> dg.AssetCheckResult:  # noqa: ANN001
         return _result(t, "row_count", False, dg.AssetCheckSeverity.ERROR, f"행 수가 적은 날짜: {detail} — 일부만 수집됐을 수 있음", 날짜별=md_table(rows))
     return _result(
         t, "row_count", False, dg.AssetCheckSeverity.WARN,
-        f"최근 날짜가 덜 들어옴: {detail} — 원천에 아직 다 안 올라왔을 수 있음, 다음 수집 때 다시 받음", 날짜별=md_table(rows),
+        f"최근 날짜 행 수가 적음: {detail} — 일부 항목만 수집됐거나 원천 반영이 늦은 경우. 원인은 수집 run 기록으로 확인", 날짜별=md_table(rows),
     )
 
 
