@@ -1,0 +1,118 @@
+# ============================================================================
+# 파이프라인 설정 — 이 파일만 고치면 됩니다.
+# 고친 뒤 Dagster UI 왼쪽 아래 "Deployment > Reload" (또는 재시작) 하면 반영됩니다.
+# ============================================================================
+
+timezone: Asia/Seoul
+
+# 원본 크롤러는 DRM 암호화 회피용으로 파일명 뒤에 ".raw" 를 붙였음. 이 PC에서는 불필요하므로 "".
+raw_postfix: ""
+
+# 재실행 정책
+retry:
+  item_retries: 2         # 펀드/종목 1건이 실패하면 그 자리에서 다시 시도하는 횟수 (지수 백오프)
+  max_retries: 2          # 수집 단계 전체가 실패하면 Dagster가 다시 실행하는 횟수
+  delay_seconds: 300      # 첫 재실행까지 대기(초), 이후 2배씩 증가
+# 재시도해도 실패한 항목/실행은 logs/errors.log 에 남습니다.
+
+# 수집 주기 이름 → cron (분 시 일 월 요일). 아래 jobs 에서 이름으로 쓰거나 cron 을 직접 써도 됨.
+#   예) 매일 06:00 "0 6 * * *" / 매주 월 07:00 "0 7 * * 1" / 매월 1일 03:00 "0 3 1 * *"
+schedules:
+  every_3_months: "0 3 1 1,4,7,10 *"     # 1·4·7·10월 1일 03:00
+
+# PostgreSQL 적재 (접속 정보는 .env 의 POSTGRES_*, DB 는 compose.yaml)
+db:
+  retention_days: 365     # 펀드 목록·상세 스냅샷 보존 기간(일). 지나면 적재할 때 자동 삭제
+
+# 파이프라인(job) 목록
+#   schedule: 위 schedules 의 이름 또는 cron 문자열
+#   enabled:  true 면 스케줄 자동 실행, false 면 수동 실행만
+#   assets:   이 job 이 실행할 asset 들 (순서는 의존관계로 자동 결정). "db/*" 처럼 끝에 /* 를 쓰면 그 접두어 전부
+#             수집(collect) → DB 적재(db/raw/...) → 추출(extract, db/extracted/...) 순으로 이어 붙이면 됨
+#   config:   asset 별 실행 옵션 (UI Launchpad 에도 이 값이 기본으로 채워짐)
+jobs:
+  fundsupermarket:
+    description: |
+      [펀드슈퍼마켓] 우리투자증권 펀드슈퍼마켓 전체 펀드 목록 → 펀드별 상세(details.json) + 공시 PDF 6종
+      (집합투자규약, 투자설명서, 간이투자설명서, 핵심상품설명서, 운용보고서, 자산관리보고서).
+      공시 PDF는 내용이 바뀌었을 때만 덮어씀 → 바뀐 PDF만 텍스트(.md)로 다시 변환.
+      저장: data/raw/fundsupermarket/ (원본), data/extracted/fundsupermarket/ (텍스트)
+    schedule: every_3_months
+    enabled: true
+    assets: 
+      - fundsupermarket/fund_list
+      - fundsupermarket/fund_details
+      - fundsupermarket/fund_documents_text
+      - db/raw/fundsupermarket_fund_list
+      - db/raw/fundsupermarket_fund_details
+      - db/raw/fundsupermarket_documents
+      - db/extracted/fundsupermarket_document_text
+    config:
+      fundsupermarket/fund_details: {workers: 8}
+      fundsupermarket/fund_documents_text: {workers: 0}   # 0 = CPU 코어 수
+
+  seibro:
+    description: |
+      [SEIBro] 증권정보포털 전체 펀드 목록(ISIN) → ISIN별 일별 NAV(기준가·과표기준가·설정원본).
+      KOFIA 펀드코드가 아닌 ISIN(KR...) 기준. 이미 받은 펀드는 마지막 날짜 7일 전부터 이어 받음. 저장: data/raw/seibro/
+    schedule: every_3_months
+    enabled: true
+    assets: [seibro/fund_list, seibro/fund_nav, db/raw/seibro_funds, db/raw/seibro_fund_nav]
+    config:
+      seibro/fund_nav: {start: "2007-01-01", workers: 8}
+
+  kofia_nav:
+    description: |
+      [KOFIA] 금융투자협회 전자공시서비스 펀드별 일별 NAV. 펀드 목록은 펀드슈퍼마켓 것(fund_code)을 씀.
+      ⚠️ 외부망 PC에서는 접속 불가. 저장: data/raw/kofia/funds/
+    schedule: every_3_months
+    enabled: false          # ⚠️ 이 PC(외부망)에서는 dis.kofia.or.kr 접속 불가
+    assets: [fundsupermarket/fund_list, kofia/fund_nav, db/raw/kofia_fund_nav]
+    config:
+      kofia/fund_nav: {start: "2019-01-01", workers: 4}
+
+  kofia_holdings:
+    description: |
+      [KOFIA] 분기영업보고서 세부현황(유가증권내역)의 펀드·ETF 전체 보유종목 → SQLite.
+      분기말(3/31·6/30·9/30·12/31) 기준, 차단 회피(불규칙 간격·요청 예산·403/429 시 24~48시간 휴식).
+      ⚠️ 외부망 PC에서는 접속 불가. 저장: data/raw/kofia/kofia_holdings.db
+    schedule: every_3_months
+    enabled: false          # ⚠️ 이 PC(외부망)에서는 dis.kofia.or.kr 접속 불가
+    assets: [kofia/fund_holdings, db/raw/kofia_holdings]
+    config:
+      kofia/fund_holdings: {command: daily, target: all, budget: 1200, lookback_days: 100}
+
+  dart:
+    description: |
+      [Open DART] 공시대상 회사 목록(상장·상장폐지) → 회사별 사업·반기·분기보고서 본문 XML (보고서마다 최신본만, 정정본 나오면 교체).
+      DART_API_KEY 필요. 저장: data/raw/dart/
+    schedule: every_3_months
+    enabled: false          # .env 에 DART_API_KEY 를 넣은 뒤 true 로
+    assets: [dart/corp_list, dart/corp_filings, db/raw/dart_corps, db/raw/dart_filings]
+    config:
+      dart/corp_filings: {lookback_days: 100, workers: 4}
+
+  krx_open_api:
+    description: |
+      [KRX OPEN API] 코스피·코스닥 종목 목록 + 주식/ETF 일별 시세(일자별 CSV, 휴장일 제외).
+      KRX_AUTH_KEY + API별 '서비스 이용' 승인 필요. 저장: data/raw/krx/
+    schedule: every_3_months
+    enabled: false          # .env 에 KRX_AUTH_KEY 를 넣은 뒤 true 로
+    assets: [krx/stock_list, krx/stock_daily_quotes, krx/etf_daily_quotes, db/raw/krx_stock_list, db/raw/krx_stock_daily, db/raw/krx_etf_daily]
+    config:
+      krx/stock_daily_quotes: {lookback_days: 100}
+      krx/etf_daily_quotes: {lookback_days: 100}
+
+  krx_web:
+    description: |
+      [KRX 정보데이터시스템 웹] 상장 ETF 전체의 구성종목. 웹 크롤링이라 과도하게 요청하면 IP 차단됨.
+      KRX 회원 ID/PW 필요. 저장: data/raw/krx/etf_constituents/
+    schedule: every_3_months
+    enabled: false          # .env 에 KRX_AUTH_ID / KRX_AUTH_PW 를 넣은 뒤 true 로
+    assets: [krx/etf_constituents, db/raw/krx_etf_constituents]
+
+  db_load_all:
+    description: |
+      [DB] data/ 의 파일 전체를 PostgreSQL 에 적재 (수집 없이). 바뀐 파일만 넣으므로 여러 번 실행해도 됨.
+      처음 한 번, 또는 DB 를 새로 만들었을 때 수동 실행. 전부 다시 넣으려면 Launchpad 에서 asset 별 force: true
+    assets: ["db/*"]

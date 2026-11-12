@@ -1,0 +1,9 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+.dagster_home/
+data/
+logs/
+wrib-crawler/
+backups
