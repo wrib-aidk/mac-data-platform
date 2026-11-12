@@ -116,14 +116,27 @@ ops:
 마이그레이션 파일로 합니다 (DB 에 직접 실행하면 다른 PC 로 옮길 때 빠짐).
 
 ```sql
--- sql/004_krx_stock_pk.sql  (예: 종목별 조회가 많아 키 순서를 종목코드 먼저로)
-ALTER TABLE raw.krx_stock_daily DROP CONSTRAINT krx_stock_daily_pkey, ADD PRIMARY KEY (isu_cd, bas_dd);
-CREATE INDEX IF NOT EXISTS seibro_fund_nav_date_idx ON raw.seibro_fund_nav (date);
+-- sql/004_xxx.sql
+ALTER TABLE raw.<테이블> DROP CONSTRAINT <테이블>_pkey, ADD PRIMARY KEY (<컬럼1>, <컬럼2>);
+CREATE INDEX IF NOT EXISTS kofia_holdings_standard_cd_idx ON raw.kofia_holdings (standard_cd);
 ```
 
 - 현재 키 확인: `select conrelid::regclass, pg_get_constraintdef(oid) from pg_constraint where contype = 'p'`
 - 새 키에 중복이 있으면 마이그레이션이 실패하고, DB 를 쓰는 asset 이 전부 실패합니다. 먼저 `select isu_cd, bas_dd, count(*) from ... group by 1, 2 having count(*) > 1` 로 확인. 큰 테이블은 키를 다시 만드는 동안 몇 분 걸리고 그동안 테이블이 잠깁니다
 - 적재 코드는 키가 아니라 펀드·날짜 단위로 지우고 다시 넣으므로, 키를 바꿔도 코드는 그대로 둬도 됩니다
+
+### 데이터 품질 체크 — `defs/quality.py`
+
+DB 적재 asset 이 실행될 때마다 자동으로 같이 돕니다. 결과는 UI 에서 asset → **Checks** 탭, 실패는 `logs/errors.log` 에 `[CHECK_FAILED]` 로도 남습니다. 기준값은 `config/pipelines.yaml` 의 `quality:`.
+
+| 체크 | 대상 | 실패 조건 | 심각도 |
+| --- | --- | --- | --- |
+| `freshness` | 날짜가 있는 raw 테이블 8개 | 마지막 날짜가 `freshness_days`(100일)보다 오래됨 / 테이블이 비어 있음 | ERROR / WARN |
+| `row_count` | 〃 | 최근 10개 날짜 중 행 수가 이전 20개 날짜 중앙값의 90% 미만 | 최근 3개 날짜면 WARN, 그 이전이면 ERROR |
+| `null_spike` | 〃 | 컬럼 빈 값 비율이 평소보다 20%p 이상 늘었거나, jsonb 응답에서 키가 사라짐 (사이트 구조 변경) | WARN |
+| `price_rules` | KRX 주식·ETF 시세 | 종가 ≤ 0, 음수, 저가≤종가≤고가 아님, 등락률 ≠ 대비/전일종가 | ERROR |
+
+적재 없이 체크만 다시 돌리려면 UI 에서 asset → Checks 탭 → **Execute**. 체크를 추가하려면 `defs/quality.py` 의 `CHECKS` 에 함수를 하나 더 넣으면 됩니다.
 
 ## 추출 파이프라인 추가하기 (처음 하는 사람용)
 
@@ -337,6 +350,7 @@ src/mac_data_platform/
   defs/schedules.py              # yaml → job/schedule
   defs/sensors.py                # 실패 run → logs/errors.log
   defs/sql_query.py              # UI 에서 SQL 조회 (sql_query_job)
+  defs/quality.py                # 데이터 품질 체크 (asset check)
   db.py                          # 마이그레이션·COPY·증분 적재 도구
   pipeline.py, settings.py       # 공통 (asset 데코레이터, 재시도 정책, 경로)
 sql/                             # 테이블 정의 (번호 순 마이그레이션)             ← 새 테이블

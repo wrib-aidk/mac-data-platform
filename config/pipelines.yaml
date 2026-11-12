@@ -24,6 +24,14 @@ schedules:
 db:
   retention_days: 365     # 펀드 목록·상세 스냅샷 보존 기간(일). 지나면 적재할 때 자동 삭제
 
+# 데이터 품질 체크 (DB 적재 asset 이 실행될 때 같이 실행, 결과는 UI asset → Checks 탭 / 실패는 logs/errors.log)
+quality:
+  freshness_days: 100     # 마지막 날짜가 이보다 오래되면 실패. 수집 주기(지금 3개월)를 줄이면 같이 줄일 것
+  row_count_ratio: 0.9    # 날짜별 행 수가 이전 날짜들 중앙값의 90% 미만이면 실패
+  null_increase: 0.2      # 컬럼 빈 값 비율이 평소보다 20%p 이상 늘면 경고
+  settle_dates: 3         # 최근 3개 날짜는 원천에 덜 올라왔을 수 있어 경고(WARN)로만
+  tables: {}              # 테이블별로 다르게: {seibro_fund_nav: {freshness_days: 10}}
+
 # 파이프라인(job) 목록
 #   schedule: 위 schedules 의 이름 또는 cron 문자열
 #   enabled:  true 면 스케줄 자동 실행, false 면 수동 실행만
