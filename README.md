@@ -99,6 +99,32 @@ asset 화면의 메타데이터에 **preview** 항목이 있습니다.
 - 접속: `docker compose exec postgres psql -U platform -d platform` 또는 DB 툴로 `127.0.0.1:5432`
 - 백업/이전: `./scripts/db_backup.sh dump` → 새 PC 에서 `docker compose up -d` 후 `./scripts/db_backup.sh restore <파일>`
 
+### UI 에서 SQL 조회 — `sql_query_job`
+
+Jobs → `sql_query_job` → Launchpad 에서 `query` 를 바꾸고 Launch. 결과는 run 화면의 `sql_query` Output 이벤트에 표로, 전체는 `data/query/<run_id>.csv` 로 저장됩니다. 읽기 전용이라 `delete`/`update` 는 실패합니다(데이터 안 바뀜).
+
+```yaml
+ops:
+  sql_query:
+    config:
+      query: "select bas_dd, tdd_clsprc from raw.krx_stock_daily where isu_cd = '005930' order by bas_dd desc"
+      limit: 100   # 화면에 보일 행 수
+```
+
+### 기본키·인덱스 바꾸기
+
+마이그레이션 파일로 합니다 (DB 에 직접 실행하면 다른 PC 로 옮길 때 빠짐).
+
+```sql
+-- sql/004_krx_stock_pk.sql  (예: 종목별 조회가 많아 키 순서를 종목코드 먼저로)
+ALTER TABLE raw.krx_stock_daily DROP CONSTRAINT krx_stock_daily_pkey, ADD PRIMARY KEY (isu_cd, bas_dd);
+CREATE INDEX IF NOT EXISTS seibro_fund_nav_date_idx ON raw.seibro_fund_nav (date);
+```
+
+- 현재 키 확인: `select conrelid::regclass, pg_get_constraintdef(oid) from pg_constraint where contype = 'p'`
+- 새 키에 중복이 있으면 마이그레이션이 실패하고, DB 를 쓰는 asset 이 전부 실패합니다. 먼저 `select isu_cd, bas_dd, count(*) from ... group by 1, 2 having count(*) > 1` 로 확인. 큰 테이블은 키를 다시 만드는 동안 몇 분 걸리고 그동안 테이블이 잠깁니다
+- 적재 코드는 키가 아니라 펀드·날짜 단위로 지우고 다시 넣으므로, 키를 바꿔도 코드는 그대로 둬도 됩니다
+
 ## 추출 파이프라인 추가하기 (처음 하는 사람용)
 
 > 만든 파이프라인 코드는 **그대로** 두고, 그 위에 Dagster 용 "껍데기(asset)" 파일 하나만 얹는 방식입니다.
@@ -310,6 +336,7 @@ src/mac_data_platform/
   defs/resources.py              # PostgresResource
   defs/schedules.py              # yaml → job/schedule
   defs/sensors.py                # 실패 run → logs/errors.log
+  defs/sql_query.py              # UI 에서 SQL 조회 (sql_query_job)
   db.py                          # 마이그레이션·COPY·증분 적재 도구
   pipeline.py, settings.py       # 공통 (asset 데코레이터, 재시도 정책, 경로)
 sql/                             # 테이블 정의 (번호 순 마이그레이션)             ← 새 테이블
