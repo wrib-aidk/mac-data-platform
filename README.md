@@ -47,6 +47,7 @@ PDF·XML 원본은 파일로 두고, 표 데이터·문서 목록·텍스트는 
 | seibro | `seibro/fund_list` → `fund_nav` | `data/raw/seibro/` (`fund_list.csv`, `funds/<ISIN>/nav.csv`) | |
 | kofia_nav | `fundsupermarket/fund_list` → `kofia/fund_nav` | `data/raw/kofia/funds/<코드>/nav.csv` | 내부망 |
 | kofia_holdings | `kofia/fund_holdings` | `data/raw/kofia/kofia_holdings.db` (이어받기 큐), 로그 `logs/kofia_holdings.log` | 3개월마다 backfill, 하루 요청 1300건 상한, 클래스 펀드 제외 |
+| kofia_fees | `kofia/fund_fees` → `kofia/etf_prospectus` | `data/raw/kofia/fees/<기준일>.csv`, `data/raw/kofia/etf_prospectus/<표준코드>/prospectus.pdf` (+ `prospectus.json`) | 보수비용은 펀드·ETF 전체, 투자설명서는 ETF 만 |
 | dart | `dart/corp_list` → `corp_filings` | `data/raw/dart/corp_list.csv`, `data/raw/dart/filings/*.xml` | `DART_API_KEY` |
 | krx_open_api | `krx/stock_list`, `stock_daily_quotes`, `etf_daily_quotes` | `data/raw/krx/stock_list.csv`, `data/raw/krx/quotes/` | `KRX_AUTH_KEY` |
 | krx_web | `krx/etf_constituents` | `data/raw/krx/etf_constituents/<YYYYMMDD>/` | `KRX_AUTH_ID/PW` |
@@ -63,6 +64,8 @@ PDF·XML 원본은 파일로 두고, 표 데이터·문서 목록·텍스트는 
 | 공시 PDF 6종 | 본문이 바뀌었을 때만 덮어씀. 문서 날짜가 기존보다 이르면 무시 | 최신 판만 |
 | DART 정기보고서 | 정정본이 나오면 교체 | 최신 판만 |
 | KOFIA 보유종목 | 정정(seq 증가) 시 해당 펀드 교체 | 최신 판만 |
+| KOFIA 보수비용 | 기준일별 파일이 쌓임. 이미 받은 기준일은 건너뜀 | 전체 이력 |
+| KOFIA ETF 투자설명서 | 서버 파일명이 바뀌었을 때만 덮어씀 | (파일만) |
 
 문서별 날짜·본문 해시·링크 파일명·갱신일은 `funds/<코드>/.docs.json` 에 기록되고, 실행 메타데이터에 `docs_new`/`docs_updated`/`docs_stale_ignored` 건수가 표시됩니다.
 

@@ -5,7 +5,7 @@ import dagster as dg
 from mac_data_platform.loaders import kofia as load
 from mac_data_platform.pipeline import db_asset, source_dir, table_result
 
-from ..collect.kofia import fund_holdings, fund_nav
+from ..collect.kofia import fees_dir, fund_fees, fund_holdings, fund_nav
 from ..resources import PostgresResource
 from ._config import LoadConfig
 
@@ -59,3 +59,20 @@ def kofia_funds(context: dg.AssetExecutionContext, config: LoadConfig, postgres:
     with postgres.connect() as conn:
         stats = load.load_funds(conn, source_dir("kofia") / "kofia_holdings.db", log=context.log, force=config.force)
         return table_result(conn, "raw.kofia_funds", stats, order_by="standard_cd")
+
+
+@db_asset(
+    "raw",
+    "kofia_fund_fees",
+    "kofia",
+    """
+    ### KOFIA 펀드별 보수비용 (`raw.kofia_fund_fees`)
+    `fees/<기준일>.csv` → (`standard_dt`, `standard_cd`) 1행. 펀드·ETF 전체. 바뀐 기준일 파일만 교체합니다.
+    ETF 만 보려면 `fund_nm LIKE '%상장지수%'`.
+    """,
+    deps=[fund_fees],
+)
+def kofia_fund_fees(context: dg.AssetExecutionContext, config: LoadConfig, postgres: PostgresResource) -> dg.MaterializeResult:
+    with postgres.connect() as conn:
+        stats = load.load_fees(conn, fees_dir(), log=context.log, force=config.force)
+        return table_result(conn, "raw.kofia_fund_fees", stats, order_by="standard_dt DESC, standard_cd")

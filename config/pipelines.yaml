@@ -90,6 +90,17 @@ jobs:
     config:
       kofia/fund_holdings: {command: backfill, target: all, budget: 1300, daily_cap: 1300, lookback_days: 100}
 
+  kofia_fees:
+    description: |
+      [KOFIA] 펀드별 보수비용비교(펀드·ETF 전체, 협회 공시 기준일=보통 월말) → ETF 투자설명서 PDF.
+      보수비용은 기준일별 CSV 로 쌓이고(이미 받은 기준일은 건너뜀), 투자설명서는 ETF 만 서버 파일이 바뀌었을 때만 다시 받음.
+      처음 한 번은 투자설명서 약 1,200개(약 1시간·2GB). 저장: data/raw/kofia/fees/, data/raw/kofia/etf_prospectus/
+    schedule: "0 6 15 * *"  # 매월 15일 06:00 (월말 기준 공시가 올라온 뒤)
+    enabled: false          # 처음엔 수동 실행으로 확인한 뒤 true 로
+    assets: [kofia/fund_fees, kofia/etf_prospectus, db/raw/kofia_fund_fees]
+    config:
+      kofia/etf_prospectus: {workers: 1, delay_seconds: 1.0}
+
   dart:
     description: |
       [Open DART] 공시대상 회사 목록(상장·상장폐지) → 회사별 사업·반기·분기보고서 본문 XML (보고서마다 최신본만, 정정본 나오면 교체).

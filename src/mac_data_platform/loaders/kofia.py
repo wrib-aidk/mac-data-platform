@@ -1,7 +1,8 @@
-"""KOFIA → raw.kofia_fund_nav / raw.kofia_holdings / raw.kofia_funds"""
+"""KOFIA → raw.kofia_fund_nav / raw.kofia_holdings / raw.kofia_funds / raw.kofia_fund_fees"""
 
 import sqlite3
 from contextlib import closing
+from datetime import datetime
 from pathlib import Path
 
 import psycopg
@@ -17,6 +18,11 @@ HOLDING_COLUMNS = [
 ]  # fmt: skip
 FUND_COLUMNS = ["standard_cd", "company_cd", "fund_nm", "fund_type", "short_cd", "start_dt", "class_cd", "is_etf", "is_private", "updated_at", "is_class"]
 _BOOL = {"is_etf", "is_private", "is_class"}
+FEE_COLUMNS = [
+    "standard_cd", "company_nm", "fund_nm", "fund_type", "start_dt", "manage_fee", "sale_fee", "trust_fee", "admin_fee",
+    "total_fee", "peer_avg_fee", "other_expense", "ter", "front_load", "back_load", "trading_fee",
+]  # fmt: skip
+_FEE_TEXT = {"standard_cd", "company_nm", "fund_nm", "fund_type", "start_dt"}
 
 
 def load_nav(conn: psycopg.Connection, funds_dir: Path, *, log, force: bool = False) -> dict:  # noqa: ANN001
@@ -27,6 +33,18 @@ def load_nav(conn: psycopg.Connection, funds_dir: Path, *, log, force: bool = Fa
 
     files = sorted(funds_dir.glob("*/nav.csv")) if funds_dir.exists() else []
     return db.load_items(conn, "raw.kofia_fund_nav", ((db.rel(p), db.fingerprint(p), p) for p in files), _one, log=log, force=force)
+
+
+def load_fees(conn: psycopg.Connection, fees_dir: Path, *, log, force: bool = False) -> dict:  # noqa: ANN001
+    """fees/<기준일>.csv → 기준일 단위로 교체."""
+
+    def _one(conn: psycopg.Connection, p: Path) -> int:
+        day = datetime.strptime(p.name[:8], "%Y%m%d").date()
+        rows = ([day, *(db.text(r.get(c)) if c in _FEE_TEXT else db.num(r.get(c)) for c in FEE_COLUMNS)] for r in read_csv(p) if r.get("standard_cd"))
+        return db.replace_rows(conn, "raw.kofia_fund_fees", {"standard_dt": day}, ["standard_dt", *FEE_COLUMNS], rows)
+
+    files = sorted(fees_dir.glob("*.csv")) if fees_dir.exists() else []
+    return db.load_items(conn, "raw.kofia_fund_fees", ((db.rel(p), db.fingerprint(p), p) for p in files), _one, log=log, force=force)
 
 
 def load_holdings(conn: psycopg.Connection, sqlite_path: Path, *, log, force: bool = False) -> dict:  # noqa: ANN001

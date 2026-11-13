@@ -35,6 +35,7 @@ TABLES = [
     Table("seibro_fund_nav", "date"),
     Table("kofia_fund_nav", "date"),
     Table("kofia_holdings", "std_dt", daily=False),
+    Table("kofia_fund_fees", "standard_dt", daily=False),
     Table("fundsupermarket_fund_list", "snapshot_date", daily=False),
     Table("fundsupermarket_fund_details", "snapshot_date", daily=False),
 ]

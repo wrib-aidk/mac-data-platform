@@ -3,6 +3,8 @@
 원본: wrib-crawler/scripts/kofia_dis/ (README "KOFIA 펀드 NAV 크롤러", "KOFIA 펀드 보유종목 크롤러")
 - fund_nav: 펀드슈퍼마켓 펀드 목록의 fund_code 별 일별 NAV
 - fund_holdings: 분기영업보고서의 펀드·ETF 전체 보유종목 → SQLite (차단 회피 로직 포함)
+- fund_fees: 펀드별 보수비용비교 (펀드·ETF 전체, 기준일별 CSV)
+- etf_prospectus: ETF 투자설명서 PDF (fund_fees 의 ETF 목록 기준)
 """
 
 import logging
@@ -10,8 +12,8 @@ import logging
 import dagster as dg
 
 from mac_data_platform import settings
-from mac_data_platform.collectors import kofia_holdings, kofia_nav
-from mac_data_platform.pipeline import ITEM_RETRIES, collect_asset, date_range, item_result, source_dir, write_error_log
+from mac_data_platform.collectors import kofia_fees, kofia_holdings, kofia_nav
+from mac_data_platform.pipeline import ITEM_RETRIES, collect_asset, csv_preview, date_range, item_result, source_dir, write_error_log
 from mac_data_platform.settings import raw_postfix
 
 from .fundsupermarket import fund_list as fsm_fund_list
@@ -138,3 +140,100 @@ def fund_holdings(context: dg.AssetExecutionContext, config: FundHoldingsConfig)
             raise dg.Failure(f"KOFIA 차단 신호 — 쿨다운 {kofia_holdings.cooldown_until(db)}까지 수집 중단 ({outcome})", allow_retries=False)
         raise dg.Failure(f"KOFIA 보유종목 수집 실패: {outcome}")
     return dg.MaterializeResult(metadata={"outcome": outcome or "skipped (cooldown)", "requests": last.get("requests") or 0, "stats": last.get("stats_json") or "", "path": dg.MetadataValue.path(str(db))})
+
+
+def fees_dir():  # noqa: ANN201
+    return source_dir("kofia") / "fees"
+
+
+def latest_fee_csv():  # noqa: ANN201
+    """가장 최근 기준일의 보수비용 CSV (파일명 = 기준일이라 이름순 마지막)."""
+    files = sorted(fees_dir().glob(f"*.csv{raw_postfix()}"))
+    if not files:
+        raise dg.Failure("보수비용 CSV 가 없습니다. kofia/fund_fees 를 먼저 실행하세요.", allow_retries=False)
+    return files[-1]
+
+
+def _blocked(context: dg.AssetExecutionContext, error: str) -> dg.Failure:
+    write_error_log("BLOCKED", asset=context.asset_key.to_user_string(), run_id=context.run_id[:8], error=error)
+    return dg.Failure(f"KOFIA 차단 신호 — 재실행하지 않고 멈춤 ({error}). 하루 이상 지난 뒤 다시 실행하세요.", allow_retries=False)
+
+
+class FundFeesConfig(dg.Config):
+    standard_dt: str = ""  # 기준일 YYYYMMDD. 비우면 협회 최신 기준일 (보통 직전 월말 영업일)
+
+
+@collect_asset(
+    "kofia",
+    "fund_fees",
+    """
+    ### KOFIA 펀드별 보수비용 (펀드·ETF 전체)
+    전자공시서비스 **펀드공시 > 펀드 보수 및 비용 > 펀드별 보수비용비교** 를 기준일 하나로 한 번에 받아
+    `data/raw/kofia/fees/<기준일>.csv` 에 저장합니다 (약 2만 개 클래스, ETF 약 1,200개).
+
+    | 컬럼 | 설명 |
+    | --- | --- |
+    | `standard_cd` | 펀드 표준코드 (`K55…`, `KR5…`. KRX 단축코드·ISIN 과 다름) |
+    | `company_nm`, `fund_nm`, `fund_type`, `start_dt` | 운용회사, 펀드명, 펀드유형, 설정일 (`YYYYMMDD`) |
+    | `manage_fee`, `sale_fee`, `trust_fee`, `admin_fee` | 보수율 운용·판매·수탁·사무관리 (%) |
+    | `total_fee` | 보수율 합계 (A) |
+    | `peer_avg_fee` | 유사유형 평균보수율 |
+    | `other_expense` | 기타비용 (B) |
+    | `ter` | 총보수·비용비율 TER (A+B) |
+    | `front_load`, `back_load` | 판매수수료 선취·후취 (%) |
+    | `trading_fee` | 매매·중개수수료율 (D) |
+
+    **기준일**: 협회가 정한 공시 기준일만 조회됩니다 (보통 월말 영업일, 다른 날짜는 0건). 비우면 최신 기준일.
+    이미 받은 기준일은 건너뜁니다 (기준일별 파일이 쌓임).
+
+    설정: `standard_dt`
+    """,
+    site="https://dis.kofia.or.kr/",
+    output="data/raw/kofia/fees/<기준일>.csv",
+)
+def fund_fees(context: dg.AssetExecutionContext, config: FundFeesConfig) -> dg.MaterializeResult:
+    try:
+        stats = kofia_fees.fetch_fees(fees_dir(), log=context.log, standard_dt=config.standard_dt, postfix=raw_postfix())
+    except kofia_fees.Blocked as e:
+        raise _blocked(context, str(e)) from e
+    path = stats.pop("path")
+    return dg.MaterializeResult(metadata={**stats, "path": dg.MetadataValue.path(str(path)), "preview": csv_preview(path, columns=["standard_cd", "fund_nm", "total_fee", "ter", "trading_fee"])})
+
+
+class EtfProspectusConfig(dg.Config):
+    workers: int = 1  # 동시 요청 수. 차단 위험이 있어 1 권장
+    delay_seconds: float = 1.0  # 요청 사이 간격(초, ±30% 무작위)
+    limit: int | None = None  # 테스트용: 앞에서부터 N개만
+
+
+@collect_asset(
+    "kofia",
+    "etf_prospectus",
+    """
+    ### KOFIA ETF 투자설명서 PDF
+    `kofia/fund_fees` 최신 CSV 에서 **ETF**(펀드명에 `상장지수`)만 골라, 표준코드마다 펀드 다모아 상세 팝업의
+    투자설명서 파일을 받아 `data/raw/kofia/etf_prospectus/<standard_cd>/prospectus.pdf` 에 저장합니다.
+    일반 펀드 투자설명서는 받지 않습니다 (펀드슈퍼마켓 수집에 있음).
+
+    같은 폴더 `prospectus.json`: 원래 파일명(`original_filename`), 서버 파일명(`server_file`), 크기, 받은 시각.
+
+    **갱신 규칙**: 서버 파일명이 지난번과 같으면 건너뛰고(`skipped`), 바뀌었으면 새 판으로 덮어씁니다(`docs_updated`).
+    협회에 투자설명서가 등록되지 않은 ETF 는 `empty`. 403/429 를 받으면 나머지는 요청하지 않고 멈춥니다 (`BLOCKED`, 재실행 안 함).
+    ETF 전체 약 1,200개 기준 처음 한 번은 약 1시간·2GB.
+
+    설정: `workers`, `delay_seconds`, `limit`(테스트용)
+    """,
+    site="https://dis.kofia.or.kr/",
+    output="data/raw/kofia/etf_prospectus/<standard_cd>/prospectus.pdf",
+    deps=[fund_fees],
+    retry_policy=dg.RetryPolicy(max_retries=1, delay=1800),  # 사이트 차단 위험이 있어 재실행을 줄임
+)
+def etf_prospectus(context: dg.AssetExecutionContext, config: EtfProspectusConfig) -> dg.MaterializeResult:
+    fee_csv = latest_fee_csv()
+    out_dir = source_dir("kofia") / "etf_prospectus"
+    result = kofia_fees.fetch_etf_prospectus(
+        fee_csv, out_dir, log=context.log, postfix=raw_postfix(), workers=config.workers, delay=config.delay_seconds, limit=config.limit, retries=ITEM_RETRIES,
+    )  # fmt: skip
+    if result.counters.get("blocked"):
+        raise _blocked(context, f"투자설명서 수집 중 403/429 ({result.summary()})")
+    return item_result(context, result, out_dir, fee_csv=fee_csv.name)
