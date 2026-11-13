@@ -86,7 +86,7 @@ jobs:
       분기마다 한 번 backfill 로 실행: 하루 상한을 다 쓰면 다음날 오전에 이어서, 큐가 빌 때까지 반복(분기당 약 10일). 저장: data/raw/kofia/kofia_holdings.db
     schedule: every_3_months
     enabled: true
-    assets: [kofia/fund_holdings, db/raw/kofia_holdings, db/raw/kofia_funds, db/extracted/kofia_fund_links, db/extracted/kofia_fund_holdings]
+    assets: [kofia/fund_holdings, db/raw/kofia_holdings, db/raw/kofia_funds, db/extracted/kofia_etf_codes, db/extracted/kofia_fund_links, db/extracted/kofia_fund_holdings]
     config:
       kofia/fund_holdings: {command: backfill, target: all, budget: 1300, daily_cap: 1300, lookback_days: 100}
 
@@ -97,7 +97,7 @@ jobs:
       처음 한 번은 투자설명서 약 1,200개(약 1시간·2GB). 저장: data/raw/kofia/fees/, data/raw/kofia/etf_prospectus/
     schedule: "0 6 15 1,4,7,10 *"  # 3개월마다 15일 06:00 (kofia_holdings 의 1일 03:00 과 겹치지 않게)
     enabled: true
-    assets: [kofia/fund_fees, kofia/etf_prospectus, db/raw/kofia_fund_fees]
+    assets: [kofia/fund_fees, kofia/etf_prospectus, db/raw/kofia_fund_fees, db/extracted/kofia_etf_codes]
     config:
       kofia/etf_prospectus: {workers: 1, delay_seconds: 1.0}
 
