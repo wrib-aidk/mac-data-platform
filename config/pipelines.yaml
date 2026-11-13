@@ -83,12 +83,12 @@ jobs:
     description: |
       [KOFIA] 분기영업보고서 세부현황(유가증권내역)의 펀드·ETF 전체 보유종목 → SQLite. 클래스 펀드 제외.
       분기말(3/31·6/30·9/30·12/31) 기준, 차단 회피(불규칙 간격·하루 1300건 상한·차단 시 24~48시간 휴식).
-      매일 새로 올라온 영업보고서만 확인하고, 남은 펀드를 하루 상한만큼씩 이어 받음. 저장: data/raw/kofia/kofia_holdings.db
-    schedule: "37 10 * * *"   # 매일 10:37 (새 보고서가 없으면 요청 2~3건으로 끝남)
+      분기마다 한 번 backfill 로 실행: 하루 상한을 다 쓰면 다음날 오전에 이어서, 큐가 빌 때까지 반복(분기당 약 10일). 저장: data/raw/kofia/kofia_holdings.db
+    schedule: every_3_months
     enabled: true
     assets: [kofia/fund_holdings, db/raw/kofia_holdings]
     config:
-      kofia/fund_holdings: {command: daily, target: all, budget: 1300, daily_cap: 1300, lookback_days: 100}
+      kofia/fund_holdings: {command: backfill, target: all, budget: 1300, daily_cap: 1300, lookback_days: 100}
 
   dart:
     description: |
