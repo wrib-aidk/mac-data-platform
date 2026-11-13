@@ -64,16 +64,40 @@ def kofia_funds(context: dg.AssetExecutionContext, config: LoadConfig, postgres:
 
 @db_asset(
     "extracted",
+    "kofia_etf_codes",
+    "kofia",
+    """
+    ### KRX ETF 종목코드 → KOFIA 표준코드 (`extracted.kofia_etf_codes`)
+    KRX ETF 전체(상장폐지 포함, 이름은 가장 최근 것)를 KOFIA ETF 전체(`raw.kofia_fund_fees` 최신 기준일 + `raw.kofia_funds`)와 맞춘 1:1 표.
+    먼저 KRX 종목코드 → ISIN → SEIBro 공식명으로 KOFIA ETF명과 정확히 맞추고(`etf_seibro`), 안 되면 이름 규칙(`etf_exact`, `etf_subseq`).
+    `extracted.kofia_fund_links` 도 ETF 는 이 표로 맞춥니다.
+
+    ```sql
+    -- ETF 보수비용을 KRX 종목코드로
+    select c.isu_cd, c.isu_nm, f.total_fee, f.ter from extracted.kofia_etf_codes c
+    join raw.kofia_fund_fees f using (standard_cd) where f.standard_dt = (select max(standard_dt) from raw.kofia_fund_fees);
+    ```
+    """,
+    deps=[kofia_funds, dg.AssetKey(["db", "raw", "kofia_fund_fees"]), dg.AssetKey(["db", "raw", "krx_etf_daily"]), dg.AssetKey(["db", "raw", "seibro_funds"])],
+)
+def kofia_etf_codes(context: dg.AssetExecutionContext, postgres: PostgresResource) -> dg.MaterializeResult:
+    with postgres.connect() as conn:
+        stats = extract_holdings.build_etf_codes(conn, log=context.log)
+        return table_result(conn, "extracted.kofia_etf_codes", stats, order_by="isu_cd")
+
+
+@db_asset(
+    "extracted",
     "kofia_fund_links",
     "kofia",
     """
     ### KOFIA 펀드 수익증권·ETF 연결표 (`extracted.kofia_fund_links`)
-    보유종목에 적힌 펀드 수익증권·ETF 이름 → 보유내역이 있는 KOFIA 펀드. `extracted.kofia_fund_holdings` 에서 펼칠 때 씁니다.
+    보유종목에 적힌 펀드 수익증권·ETF 이름 → KOFIA 펀드. `extracted.kofia_fund_holdings` 에서 펼칠 때 씁니다.
     보유종목에는 이름이 줄여 쓰이거나(`IT코리아증권모[주식]`) 30자에서 잘리고, ETF 는 KRX 이름(`KODEX 삼성그룹`)으로 적혀 있어 규칙으로 맞춥니다.
-    ETF 는 먼저 KRX 종목코드 → ISIN → SEIBro 공식명으로 KOFIA ETF명과 정확히 맞추고(`etf_seibro`), 안 되면 이름 규칙으로.
+    ETF 는 기준일 KRX 종목명 → `extracted.kofia_etf_codes` 로 표준코드 (보유내역이 없는 ETF 도 연결되지만 펼쳐지지는 않음).
     `method` 로 어떻게 맞췄는지 확인할 수 있습니다 (`etf_seibro`, `etf_exact`, `etf_subseq`, `exact`, `subseq`, `subseq_any`, `+class`, `+feeder`).
     """,
-    deps=[kofia_holdings, kofia_funds, dg.AssetKey(["db", "raw", "krx_etf_daily"]), dg.AssetKey(["db", "raw", "seibro_funds"])],
+    deps=[kofia_holdings, kofia_funds, kofia_etf_codes, dg.AssetKey(["db", "raw", "krx_etf_daily"])],
 )
 def kofia_fund_links(context: dg.AssetExecutionContext, postgres: PostgresResource) -> dg.MaterializeResult:
     with postgres.connect() as conn:

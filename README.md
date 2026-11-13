@@ -78,6 +78,7 @@ PDF·XML 원본은 파일로 두고, 표 데이터·문서 목록·텍스트는 
 | asset | 내용 | 상태 |
 | --- | --- | --- |
 | `fundsupermarket/fund_documents_text` | 공시 PDF → 텍스트 `.md` (원본 `convert_pdf_to_txt.py`, 결과가 HF 의 `.md` 와 같음) | `fundsupermarket` job 에서 `fund_details` 다음에 실행. 바뀐 PDF 만 다시 변환 (`.text.json`) |
+| `db/extracted/kofia_etf_codes` | KRX ETF 종목코드 ↔ KOFIA 표준코드 1:1 (`extracted.kofia_etf_codes`). SEIBro 공식명으로 먼저 맞추고 안 되면 이름 규칙. ETF 보수비용을 종목코드로 볼 때, 연결표에서 ETF 를 맞출 때 씀 | `kofia_holdings`, `kofia_fees` job 에서 실행. 매번 통째로 다시 만듦 |
 | `db/extracted/kofia_fund_holdings` | KOFIA 보유종목 → 펀드별 실제 보유종목 (`extracted.kofia_fund_holdings`): 모투자신탁 수익증권을 그 펀드 종목으로 펼쳐 비율대로 나누고, 국내 주식·ETF 에 KRX 종목코드(`isu_cd`)를 붙임 | `kofia_holdings` job 에서 DB 적재 다음에 실행. 매번 기준일별로 다시 만듦 |
 
 ### UI 에서 결과 미리보기
