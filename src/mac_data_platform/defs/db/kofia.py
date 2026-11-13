@@ -2,6 +2,7 @@
 
 import dagster as dg
 
+from mac_data_platform.extractors import kofia_holdings as extract_holdings
 from mac_data_platform.loaders import kofia as load
 from mac_data_platform.pipeline import db_asset, source_dir, table_result
 
@@ -59,3 +60,31 @@ def kofia_funds(context: dg.AssetExecutionContext, config: LoadConfig, postgres:
     with postgres.connect() as conn:
         stats = load.load_funds(conn, source_dir("kofia") / "kofia_holdings.db", log=context.log, force=config.force)
         return table_result(conn, "raw.kofia_funds", stats, order_by="standard_cd")
+
+
+@db_asset(
+    "extracted",
+    "kofia_fund_holdings",
+    "kofia",
+    """
+    ### KOFIA 펀드별 실제 보유종목 (`extracted.kofia_fund_holdings`)
+    `raw.kofia_holdings` 에서 펀드마다 실제로 들고 있는 종목을 뽑습니다.
+    - 모투자신탁 등 다른 펀드의 수익증권은, 그 펀드 보유내역도 받아 두었으면 그 펀드의 종목으로 펼쳐 보유 비율만큼 나눔 (최대 3단계, `via` 에 거쳐 온 펀드)
+    - 같은 종목은 합치고, `weight` = 펀드 보유자산 시가평가액 합계 대비 비중(%), `rank` = 펀드 안 순위
+    - 국내 주식·ETF 는 기준일 KRX 종목명으로 `isu_cd`(종목코드)를 붙임 (해외주식·채권은 빈 값)
+
+    ```sql
+    -- 펀드 보유종목 상위
+    select rank, item_nm, isu_cd, weight, via from extracted.kofia_fund_holdings
+    where std_dt = '2026-06-30' and fund_nm = '삼성KODEX200증권상장지수투자신탁[주식]' order by rank;
+    -- 삼성전자를 들고 있는 펀드
+    select fund_nm, weight, market_amt from extracted.kofia_fund_holdings
+    where std_dt = '2026-06-30' and isu_cd = '005930' order by market_amt desc;
+    ```
+    """,
+    deps=[kofia_holdings, kofia_funds, dg.AssetKey(["db", "raw", "krx_stock_daily"]), dg.AssetKey(["db", "raw", "krx_etf_daily"])],
+)
+def kofia_fund_holdings(context: dg.AssetExecutionContext, postgres: PostgresResource) -> dg.MaterializeResult:
+    with postgres.connect() as conn:
+        stats = extract_holdings.build(conn, log=context.log)
+        return table_result(conn, "extracted.kofia_fund_holdings", stats, order_by="std_dt DESC, standard_cd, rank")
