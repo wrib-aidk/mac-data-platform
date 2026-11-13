@@ -64,7 +64,9 @@ class FundHoldingsConfig(dg.Config):
     quarters: list[str] = []  # 분기말 YYYYMMDD, 비우면 최근 lookback_days 안의 분기말
     lookback_days: int = 100
     companies: list[str] = []  # 테스트용: 운용사 코드 (예: A01031)
-    budget: int = 1200  # 한 묶음 최대 요청 수 (±20% 무작위)
+    budget: int = 1300  # 한 묶음 최대 요청 수 (±20% 무작위)
+    daily_cap: int = 1300  # 하루(그날 실행 합계) 최대 요청 수. 다 쓰면 그날은 건너뜀, backfill 은 다음날 09:00~11:30 까지 대기
+    include_class: bool = False  # True 면 클래스 펀드(A, C-Pe 등)도 수집. 기본은 클래스 펀드 제외
     force: bool = False  # 차단 쿨다운 무시
 
 
@@ -81,28 +83,29 @@ class _ToDagsterLog(logging.Handler):
     "kofia",
     "fund_holdings",
     """
-    ### KOFIA 펀드·ETF 보유종목 (분기영업보고서)  ⚠️ 외부망 PC에서 사용 불가
+    ### KOFIA 펀드·ETF 보유종목 (분기영업보고서)
     전자공시서비스 **펀드공시 > 분기영업보고서 > 운용현황 > 세부현황(유가증권내역)** 에서 펀드·ETF별 **전체 보유종목**
     (종목명, 유가증권 종류, 수량, 취득·시가·장부평가액, 발행지, 상장여부)을 받아 SQLite에 적재합니다.
     원본 작성자: 박현석
 
     - 보유내역은 **분기말 기준**(3/31, 6/30, 9/30, 12/31)으로만 제공, 운용사가 분기 종료 후 약 2개월 안에 제출
     - 종목코드는 없고 종목명만 제공. 클래스 펀드·자투자신탁은 모펀드 수익증권 1~2행만 나옴 (실제 종목은 `모투자신탁`/`(운용)` 펀드에 있음)
+    - **클래스 펀드 제외**: 클래스(A, C-Pe, 종류S, Class P1 …)로 판별된 펀드는 `skipped` 로 건너뜀 (`funds.is_class`). 이미 받은 클래스 데이터는 그대로 둠
 
     | 테이블 | 설명 |
     | --- | --- |
     | `holdings` | 보유종목 (`std_dt` 기준일, `standard_cd` 펀드코드, `item_nm`, `security_type`, `quantity`, `market_amt` 등, 금액 단위 원), 원본은 `raw_json` |
-    | `funds` | 펀드 목록 (`fund_nm`, `is_etf`, `is_private`, `start_dt` 등) |
-    | `jobs` | 펀드별 수집 상태 (`pending` / `done` / `empty` / `error`) — 다음 실행 때 남은 것만 이어 받음 |
+    | `funds` | 펀드 목록 (`fund_nm`, `is_etf`, `is_private`, `is_class`, `start_dt` 등) |
+    | `jobs` | 펀드별 수집 상태 (`pending` / `done` / `empty` / `error` / `skipped`) — 다음 실행 때 남은 것만 이어 받음 |
     | `company_filings` | 발견한 운용사별 영업보고서 제출 기록 (정정 보고서가 올라오면 해당 운용사 펀드를 다시 받음) |
 
-    **차단 회피**: 요청 간격 1.5~20초 불규칙, 50~120건마다 1~3분 휴식, 한 번에 최대 `budget`(±20%)건.
-    403/429를 받으면 즉시 멈추고 24~48시간 쉽니다 (`BLOCKED` 로그, 재실행 안 함).
+    **차단 회피**: 요청 간격 2.5~25초 불규칙(중앙값 5.5초), 50~120건마다 1~3분 휴식, 한 번에 최대 `budget`(±20%)건, 하루 합계 `daily_cap`건.
+    시작 전 메인 페이지 GET 으로 접속 확인. 403/429 또는 연결 실패 3회 연속이면 즉시 멈추고 24~48시간 쉽니다 (`BLOCKED` 로그, 재실행 안 함).
 
     설정
     - `command`: `daily`(요청 예산만큼 한 묶음) / `backfill`(큐가 빌 때까지 "묶음 → 1~2시간 휴식" 반복, 분기당 2만 개 이상일 때)
     - `target`: `all` / `etf` / `fund`, `quarters`: 분기말 `YYYYMMDD` (비우면 최근 `lookback_days` 안의 분기말)
-    - `budget`, `include_private`, `companies`(테스트용 운용사 코드), `force`(쿨다운 무시)
+    - `budget`, `daily_cap`, `include_class`, `include_private`, `companies`(테스트용 운용사 코드), `force`(쿨다운 무시)
 
     로그: `logs/kofia_holdings.log`
     """,
@@ -122,7 +125,8 @@ def fund_holdings(context: dg.AssetExecutionContext, config: FundHoldingsConfig)
     try:
         code, last = kofia_holdings.run(
             db, command=config.command, target=config.target, include_private=config.include_private, quarters=config.quarters,
-            lookback_days=config.lookback_days, companies=config.companies, budget=config.budget, force=config.force,
+            lookback_days=config.lookback_days, companies=config.companies, budget=config.budget, daily_cap=config.daily_cap,
+            include_class=config.include_class, force=config.force,
         )  # fmt: skip
     finally:
         for h in handlers:

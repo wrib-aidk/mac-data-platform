@@ -14,7 +14,8 @@ HOLDING_COLUMNS = [
     "std_dt", "standard_cd", "line_no", "company_cd", "item_nm", "security_type", "quantity", "acquisition_amt",
     "market_amt", "book_amt", "issue_region", "listing", "issue_dt", "coupon_rate", "raw_json", "loaded_at",
 ]  # fmt: skip
-FUND_COLUMNS = ["standard_cd", "company_cd", "fund_nm", "fund_type", "short_cd", "start_dt", "class_cd", "is_etf", "is_private", "updated_at"]
+FUND_COLUMNS = ["standard_cd", "company_cd", "fund_nm", "fund_type", "short_cd", "start_dt", "class_cd", "is_etf", "is_private", "updated_at", "is_class"]
+_BOOL = {"is_etf", "is_private", "is_class"}
 
 
 def load_nav(conn: psycopg.Connection, funds_dir: Path, *, log, force: bool = False) -> dict:  # noqa: ANN001
@@ -34,8 +35,9 @@ def load_holdings(conn: psycopg.Connection, sqlite_path: Path, *, log, force: bo
         src = sqlite3.connect(f"file:{p}?mode=ro", uri=True)
         try:
             n = db.replace_rows(conn, "raw.kofia_holdings", None, HOLDING_COLUMNS, src.execute(f"SELECT {', '.join(HOLDING_COLUMNS)} FROM holdings"))  # noqa: S608
-            funds = ([*r[:7], bool(r[7]) if r[7] is not None else None, bool(r[8]) if r[8] is not None else None, r[9]] for r in src.execute(f"SELECT {', '.join(FUND_COLUMNS)} FROM funds"))  # noqa: S608
-            db.replace_rows(conn, "raw.kofia_funds", None, FUND_COLUMNS, funds)
+            cols = [c for c in FUND_COLUMNS if c in {r[1] for r in src.execute("PRAGMA table_info(funds)")}]  # 예전 DB 에는 is_class 가 없음
+            funds = ([bool(v) if c in _BOOL and v is not None else v for c, v in zip(cols, r, strict=True)] for r in src.execute(f"SELECT {', '.join(cols)} FROM funds"))  # noqa: S608
+            db.replace_rows(conn, "raw.kofia_funds", None, cols, funds)
         finally:
             src.close()
         return n

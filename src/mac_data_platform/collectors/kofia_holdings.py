@@ -23,6 +23,7 @@ import subprocess
 import sys
 import time
 import xml.etree.ElementTree as ET
+from collections import Counter
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -63,9 +64,9 @@ class KofiaTLSAdapter(HTTPAdapter):
 
 
 class Pacer:
-    """불규칙한 요청 간격(로그정규, 중앙값 3.5초)과 50~120건마다 45~180초 휴식."""
+    """불규칙한 요청 간격(로그정규, 중앙값 5.5초)과 50~120건마다 45~180초 휴식."""
 
-    def __init__(self, median_delay: float = 3.5, min_delay: float = 1.5, max_delay: float = 20.0) -> None:
+    def __init__(self, median_delay: float = 5.5, min_delay: float = 2.5, max_delay: float = 25.0) -> None:
         self.mu = math.log(median_delay)
         self.min_delay, self.max_delay = min_delay, max_delay
         self._next_break = RNG.randint(50, 120)
@@ -86,10 +87,13 @@ class Pacer:
 
 
 class KofiaClient:
-    """요청 예산을 넘지 않고, 403/429를 받으면 즉시 멈춘다. IP/UA 교체 같은 우회는 하지 않는다."""
+    """요청 예산을 넘지 않고, 차단 신호를 받으면 즉시 멈춘다. IP/UA 교체 같은 우회는 하지 않는다."""
+
+    # 응답 없이 연결 단계에서 연속으로 실패하면 방화벽 차단으로 본다 (403/429 없이 RemoteDisconnected → ConnectTimeout만 반복되는 경우가 있음)
+    NET_FAIL_BLOCK = 3
 
     def __init__(self, budget: int, max_retries: int = 3) -> None:
-        self.budget, self.used, self.max_retries = budget, 0, max_retries
+        self.budget, self.used, self.max_retries, self.net_failures = budget, 0, max_retries, 0
         self.pacer = Pacer()
         self.session = requests.Session()
         self.session.mount("https://dis.kofia.or.kr", KofiaTLSAdapter())
@@ -119,8 +123,12 @@ class KofiaClient:
             try:
                 r = self.session.post(URL, data=body, headers={"Content-Type": "text/xml; charset=utf-8"}, timeout=90)
             except (requests.ConnectionError, requests.Timeout) as e:
+                self.net_failures += 1
+                if self.net_failures >= self.NET_FAIL_BLOCK:
+                    raise BlockedError(f"연결 실패 {self.net_failures}회 연속 — 차단 의심 ({type(e).__name__})") from e
                 self._backoff(attempt, f"네트워크 오류: {e}")
                 continue
+            self.net_failures = 0
             if r.status_code in {403, 429}:
                 raise BlockedError(f"HTTP {r.status_code} from {svc}.{fn}")
             if r.status_code >= 500:
@@ -134,6 +142,17 @@ class KofiaClient:
                 raise ServiceError(f"{svc}.{fn}: {header.findtext('pfmResponseCode')} {header.findtext('pfmResponseBasc')}")
             return message
         raise ServiceError(f"{svc}.{fn}: 재시도 {self.max_retries}회 실패")
+
+    def preflight(self) -> None:
+        """본 요청 전에 메인 페이지 GET 1건으로 접속 가능한지 확인. 안 되면 차단으로 보고 시작하지 않는다."""
+        self.used += 1
+        try:
+            r = self.session.get("https://dis.kofia.or.kr/", timeout=20)
+        except (requests.ConnectionError, requests.Timeout) as e:
+            raise BlockedError(f"사전 접속 확인 실패 ({type(e).__name__})") from e
+        if r.status_code != 200:
+            raise BlockedError(f"사전 접속 확인 실패 (HTTP {r.status_code})")
+        log.info("사전 접속 확인 OK")
 
     def _backoff(self, attempt: int, reason: str) -> None:
         wait = min(600, 15 * 2**attempt) * RNG.uniform(0.7, 1.3)
@@ -271,7 +290,7 @@ CREATE TABLE IF NOT EXISTS funds (standard_cd TEXT PRIMARY KEY, company_cd TEXT,
 CREATE TABLE IF NOT EXISTS forms (std_dt TEXT PRIMARY KEY, form_json TEXT, fetched_at TEXT);
 CREATE TABLE IF NOT EXISTS jobs (
     std_dt TEXT, standard_cd TEXT, company_cd TEXT, filing_seq INTEGER,
-    status TEXT DEFAULT 'pending',  -- pending | done | empty | error
+    status TEXT DEFAULT 'pending',  -- pending | done | empty | error | skipped(클래스 펀드 제외)
     attempts INTEGER DEFAULT 0, n_rows INTEGER, last_error TEXT, updated_at TEXT,
     PRIMARY KEY (std_dt, standard_cd)
 );
@@ -303,6 +322,34 @@ NUMERIC = {"quantity", "acquisition_amt", "market_amt", "book_amt", "coupon_rate
 TARGET_SQL = {"all": "1=1", "etf": "f.is_etf=1", "fund": "f.is_etf=0"}
 
 
+# 클래스 펀드 제외: 클래스(A, C-Pe, 종류S, Class P1 …)는 모펀드 수익증권 1~2행만 나와 보유종목 정보가 없다.
+# 2026-06-30 기준 클래스로 판별된 펀드 7,956개를 실제로 받아 확인: 평균 1.0행, 5행 이상 0개.
+_CLASS_TOK = r"(?:종류\s*|Class\s*)?[A-Z][A-Za-z0-9\-]{0,8}(?:\s*클래스|형)?"
+_CLASS_SUFFIX = re.compile(rf"(?:(?:_|(?<=[\)\]])|\s)?{_CLASS_TOK}|\s*\({_CLASS_TOK}\)|\s*\(퇴직연금\))+\s*$")
+_CLASS_LAST = re.compile(rf"(?:(?:_|(?<=[\)\]])|\s)?({_CLASS_TOK})|\s*\(({_CLASS_TOK})\))\s*$")
+_NOT_CLASS = {"H", "UH", "USD", "KRW", "EUR", "JPY", "CNY", "MMF", "ESG", "TDF", "TIF", "EMP", "AI", "REITs", "ETF"}  # 환헤지·통화·상품 표시
+
+
+def _class_base(name: str) -> str | None:
+    """클래스 접미사를 뗀 이름. 마지막 접미사가 클래스 표시가 아니면 None."""
+    m = _CLASS_LAST.search(re.sub(r"\s*\(퇴직연금\)\s*$", "", name))
+    tok = m and (m.group(1) or m.group(2))
+    if not tok or re.sub(r"^(종류|Class)\s*|\s*클래스$|형$", "", tok) in _NOT_CLASS:
+        return None
+    suffix = _CLASS_SUFFIX.search(name)
+    return name[: suffix.start()].rstrip(" _-") if suffix else None
+
+
+def classify_classes(funds: list[tuple[str, str, str]]) -> set[str]:
+    """[(standard_cd, company_cd, fund_nm)] → 클래스 펀드 standard_cd 집합.
+
+    접미사를 뗀 이름을 같은 운용사의 다른 펀드와 공유해야 클래스로 본다 (단독 펀드 오판 방지).
+    """
+    bases = {cd: _class_base(nm) for cd, _, nm in funds}
+    counts = Counter((co, bases[cd] or nm) for cd, co, nm in funds)
+    return {cd for cd, co, _ in funds if (b := bases[cd]) and counts[(co, b)] >= 2}
+
+
 def now() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
@@ -325,6 +372,10 @@ class Store:
         self.conn = sqlite3.connect(path)
         self.conn.row_factory = sqlite3.Row
         self.conn.executescript(SCHEMA)
+        if "is_class" not in {r[1] for r in self.conn.execute("PRAGMA table_info(funds)")}:
+            with self.conn:
+                self.conn.execute("ALTER TABLE funds ADD COLUMN is_class INTEGER DEFAULT 0")
+            self.refresh_classes()
 
     def get(self, k: str) -> str | None:
         row = self.conn.execute("SELECT v FROM kv WHERE k=?", (k,)).fetchone()
@@ -344,9 +395,28 @@ class Store:
     def upsert_funds(self, funds: list[dict[str, Any]]) -> None:
         with self.conn:
             self.conn.executemany(
-                "INSERT OR REPLACE INTO funds VALUES (:standard_cd,:company_cd,:fund_nm,:fund_type,:short_cd,:start_dt,:class_cd,:is_etf,:is_private,:updated_at)",
+                "INSERT OR REPLACE INTO funds VALUES (:standard_cd,:company_cd,:fund_nm,:fund_type,:short_cd,:start_dt,:class_cd,:is_etf,:is_private,:updated_at,0)",
                 [{**f, "updated_at": now()} for f in funds],
             )
+        self.refresh_classes()
+
+    def refresh_classes(self) -> None:
+        funds = [tuple(r) for r in self.conn.execute("SELECT standard_cd, company_cd, fund_nm FROM funds")]
+        classes = classify_classes(funds)
+        with self.conn:
+            self.conn.executemany("UPDATE funds SET is_class=? WHERE standard_cd=?", [(int(cd in classes), cd) for cd, _, _ in funds])
+
+    def skip_class_jobs(self, target: str, include_private: bool) -> int:
+        """클래스 펀드 제외: 대기 중인 클래스 펀드 작업을 'skipped'로. 이미 받은 데이터는 그대로 둔다."""
+        with self.conn:
+            return self.conn.execute(
+                "UPDATE jobs SET status='skipped', updated_at=? WHERE status IN ('pending','error') "  # noqa: S608
+                f"AND standard_cd IN (SELECT f.standard_cd FROM funds f WHERE f.is_class=1 AND {target_sql(target, include_private)})",
+                (now(),),
+            ).rowcount
+
+    def requests_today(self) -> int:
+        return self.conn.execute("SELECT IFNULL(SUM(requests), 0) FROM runs WHERE started_at >= ?", (date.today().isoformat(),)).fetchone()[0]
 
     def enqueue(self, std_dt: str, company_cd: str, filing_seq: int, standard_cds: list[str]) -> None:
         """새 작업 추가. 정정(seq 증가)이면 기존 작업도 다시 pending으로."""
@@ -442,9 +512,11 @@ def discover(client: KofiaClient, store: Store, args: argparse.Namespace, stats:
 
 def work(client: KofiaClient, store: Store, args: argparse.Namespace, stats: dict[str, Any]) -> None:
     """큐의 작업을 무작위 순서로, 예산이 남는 동안 처리한다."""
+    if skipped := 0 if args.include_class else store.skip_class_jobs(args.target, args.include_private):
+        log.info("[수집] 클래스 펀드 제외 %d건 (모펀드 수익증권만 나옴)", skipped)
     jobs = store.pending_jobs(args.target, args.include_private, args.quarter)
     RNG.shuffle(jobs)
-    stats.update(target=args.target, pending=len(jobs), done=0, empty=0, error=0)
+    stats.update(target=args.target, pending=len(jobs), skipped_class=skipped, done=0, empty=0, error=0)
     forms: dict[str, dict[str, Any]] = {}
     consecutive_errors = 0
     for job in jobs:
@@ -478,9 +550,14 @@ def run_once(args: argparse.Namespace, steps: tuple[str, ...]) -> int:
     if (cooldown := store.get("cooldown_until")) and datetime.fromisoformat(cooldown) > datetime.now() and not args.force:
         log.warning("차단 감지 후 쿨다운 중 (%s까지) — 건너뜀", cooldown)
         return 0
-    client = KofiaClient(budget=int(args.budget * RNG.uniform(0.8, 1.2)))  # 매일 요청량도 조금씩 다르게
+    # 매번 요청량을 ±20% 다르게 하되, 그날 실행들의 합계는 --daily-cap을 넘지 않게
+    if (budget := min(int(args.budget * RNG.uniform(0.8, 1.2)), args.daily_cap - (used := store.requests_today()))) <= 0:
+        log.warning("오늘 요청 %d건으로 하루 상한 %d건 도달 — 건너뜀", used, args.daily_cap)
+        return 0
+    client = KofiaClient(budget=budget)
     run_id, stats, outcome = store.start_run(), {}, "ok"
     try:
+        client.preflight()  # 접속이 안 되면 BlockedError → 아래에서 쿨다운 기록
         for step in steps:  # 중간에 멈춰도 그때까지의 통계가 남도록 dict를 넘긴다
             stats[step] = {}
             {"discover": discover, "work": work}[step](client, store, args, stats[step])
@@ -504,7 +581,10 @@ def run_once(args: argparse.Namespace, steps: tuple[str, ...]) -> int:
 
 
 def backfill(args: argparse.Namespace) -> int:
-    """'묶음 → 1~2시간 휴식'을 큐가 빌 때까지 반복하고, 끝나면 macOS 알림을 띄운다."""
+    """'묶음 → 1~2시간 휴식'을 큐가 빌 때까지 반복하고, 끝나면 macOS 알림을 띄운다.
+
+    하루 상한(--daily-cap)을 다 쓰면 다음날 09:00~11:30 사이 무작위 시각까지 쉰다.
+    """
     store = Store(args.db)
     batch = 0
     while left := len(store.pending_jobs(args.target, args.include_private, args.quarter)):
@@ -513,12 +593,18 @@ def backfill(args: argparse.Namespace) -> int:
             log.info("[백필] 차단 쿨다운 중 → %.1f시간 대기", wait / 3600)
             time.sleep(wait)
             continue
+        if args.daily_cap - store.requests_today() < 50:  # 남은 몇십 건으로 묶음을 돌리진 않는다
+            wake = datetime.combine(date.today() + timedelta(days=1), datetime.min.time()) + timedelta(hours=9, minutes=RNG.uniform(0, 150))
+            log.info("[백필] 하루 상한 %d건 도달 → %s까지 대기", args.daily_cap, f"{wake:%m-%d %H:%M}")
+            time.sleep(max(0.0, (wake - datetime.now()).total_seconds()))
+            continue
         batch += 1
         log.info("[백필] 묶음 %d 시작 (남은 %d)", batch, left)
         code = run_once(args, ("discover", "work"))
         after = len(store.pending_jobs(args.target, args.include_private, args.quarter))
         log.info("[백필] 묶음 %d 종료 (이번에 %d건 처리, 남은 %d)", batch, left - after, after)
-        if code != 0 and left == after and not store.get("cooldown_until"):
+        cooling = (cooldown := store.get("cooldown_until")) is not None and datetime.fromisoformat(cooldown) > datetime.now()
+        if code != 0 and left == after and not cooling:  # 차단이면 위의 쿨다운 대기로 넘어가고, 그 외 실패는 중단
             notify("KOFIA 백필 중단", f"{args.target}: 진척 없이 실패, 남은 {after}건")
             return 1
         if after:
@@ -576,11 +662,11 @@ def export(args: argparse.Namespace) -> int:
 # ---------------------------------------------------------------------------- Dagster 실행부 (원본 main() 대체)
 
 
-def run(db: Path, *, command: str = "daily", target: str = "all", include_private: bool = False, quarters: list[str] | None = None, lookback_days: int = 100, companies: list[str] | None = None, budget: int = 1200, gap_min: int = 60, gap_max: int = 120, force: bool = False) -> tuple[int, dict[str, Any]]:
+def run(db: Path, *, command: str = "daily", target: str = "all", include_private: bool = False, quarters: list[str] | None = None, lookback_days: int = 100, companies: list[str] | None = None, budget: int = 1300, daily_cap: int = 1300, include_class: bool = False, gap_min: int = 60, gap_max: int = 120, force: bool = False) -> tuple[int, dict[str, Any]]:
     """daily(=discover+work 한 묶음) 또는 backfill(큐가 빌 때까지 반복). (종료코드, 마지막 실행 기록)을 돌려줌."""
     args = argparse.Namespace(
         db=db, target=target, include_private=include_private, quarter=quarters or None, lookback_days=lookback_days,
-        company=companies or None, budget=budget, gap_min=gap_min, gap_max=gap_max, force=force,
+        company=companies or None, budget=budget, daily_cap=daily_cap, include_class=include_class, gap_min=gap_min, gap_max=gap_max, force=force,
     )  # fmt: skip
     code = backfill(args) if command == "backfill" else run_once(args, ("discover", "work"))
     last = Store(db).conn.execute("SELECT * FROM runs ORDER BY run_id DESC LIMIT 1").fetchone()
