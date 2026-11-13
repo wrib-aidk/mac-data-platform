@@ -70,9 +70,10 @@ def kofia_funds(context: dg.AssetExecutionContext, config: LoadConfig, postgres:
     ### KOFIA 펀드 수익증권·ETF 연결표 (`extracted.kofia_fund_links`)
     보유종목에 적힌 펀드 수익증권·ETF 이름 → 보유내역이 있는 KOFIA 펀드. `extracted.kofia_fund_holdings` 에서 펼칠 때 씁니다.
     보유종목에는 이름이 줄여 쓰이거나(`IT코리아증권모[주식]`) 30자에서 잘리고, ETF 는 KRX 이름(`KODEX 삼성그룹`)으로 적혀 있어 규칙으로 맞춥니다.
-    `method` 로 어떻게 맞췄는지 확인할 수 있습니다 (`etf_exact`, `etf_subseq`, `exact`, `subseq`, `subseq_any`, `+class`, `+feeder`).
+    ETF 는 먼저 KRX 종목코드 → ISIN → SEIBro 공식명으로 KOFIA ETF명과 정확히 맞추고(`etf_seibro`), 안 되면 이름 규칙으로.
+    `method` 로 어떻게 맞췄는지 확인할 수 있습니다 (`etf_seibro`, `etf_exact`, `etf_subseq`, `exact`, `subseq`, `subseq_any`, `+class`, `+feeder`).
     """,
-    deps=[kofia_holdings, kofia_funds, dg.AssetKey(["db", "raw", "krx_etf_daily"])],
+    deps=[kofia_holdings, kofia_funds, dg.AssetKey(["db", "raw", "krx_etf_daily"]), dg.AssetKey(["db", "raw", "seibro_funds"])],
 )
 def kofia_fund_links(context: dg.AssetExecutionContext, postgres: PostgresResource) -> dg.MaterializeResult:
     with postgres.connect() as conn:

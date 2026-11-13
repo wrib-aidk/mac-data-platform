@@ -1,7 +1,8 @@
 """raw.kofia_holdings → extracted.kofia_fund_links, extracted.kofia_fund_holdings (펀드별 실제 보유종목).
 
 1. 연결표: 보유종목에 적힌 펀드 수익증권·ETF 이름을 보유내역이 있는 KOFIA 펀드와 맞춘다.
-   - ETF: 보유종목 이름 = KRX ETF명 (`KODEX 삼성그룹`) → KOFIA ETF명 (`삼성KODEX삼성그룹주증권상장지수투자신탁[주식]`)
+   - ETF: 보유종목 이름 = KRX ETF명 (`KODEX 삼성그룹`). 먼저 KRX 종목코드 → ISIN(KR7+코드) → SEIBro 공식명으로
+     KOFIA ETF명과 정확히 맞추고(`etf_seibro`), 안 되면 KOFIA ETF명 (`삼성KODEX삼성그룹주증권상장지수투자신탁[주식]`)
      에서 브랜드(KODEX…) 뒤 부분을 비교. 브랜드가 바뀐 ETF(KOSEF→KIWOOM 등)는 옛 브랜드도 봄
    - 펀드: 이름이 같거나, 줄여 쓴 이름(`IT코리아증권모[주식]` → `하나IT코리아증권모투자신탁[주식]`)이 순서대로
      다 들어 있고 숫자가 같으면 연결. 같은 운용사 펀드를 먼저 보고, 후보가 여럿이면 덜 붙은 이름 하나만 허용
@@ -42,6 +43,11 @@ def etf_key(name: str) -> str:
     return re.sub(r"[^0-9A-Z가-힣&]", "", s)
 
 
+def official_key(name: str) -> str:
+    """공식 펀드명 비교용 (SEIBro ↔ KOFIA): 괄호 모양·띄어쓰기·기호만 무시."""
+    return re.sub(r"[^0-9A-Z가-힣&]", "", name.upper())
+
+
 def _flags(name: str) -> frozenset[str]:
     u = name.upper().replace(" ", "")
     return frozenset(f for f, pat in (("H", r"[\(\[](합성)?H[\)\]]"), ("합성", "합성")) if re.search(pat, u))
@@ -58,8 +64,8 @@ def _digits(s: str) -> list[str]:
 
 # ---------------------------------------------------------------------------- 연결
 class Linker:
-    def __init__(self, funds: list[tuple[str, str, str, bool, bool]], krx_etfs: list[tuple[str, str]]) -> None:
-        """funds: (standard_cd, company_cd, fund_nm, is_etf, is_class) 보유내역이 있는 펀드, krx_etfs: (isu_cd, isu_nm)
+    def __init__(self, funds: list[tuple[str, str, str, bool, bool]], krx_etfs: list[tuple[str, str, str | None]]) -> None:
+        """funds: (standard_cd, company_cd, fund_nm, is_etf, is_class) 보유내역이 있는 펀드, krx_etfs: (isu_cd, isu_nm, SEIBro 공식명)
 
         클래스 펀드는 본 펀드 수익증권만 들고 있어 연결 대상에서 뺀다 (예전에 받아 둔 클래스 데이터가 있어도).
         """
@@ -72,9 +78,16 @@ class Linker:
                 self.by_key[self.key[cd]].append((cd, co))
                 self.by_co[co].append(cd)
         etf_funds = [(cd, nm) for cd, _, nm, is_etf, _ in funds if is_etf or "상장지수" in nm.replace(" ", "")]
+        by_official: dict[str, list[str]] = defaultdict(list)
+        for cd, nm in etf_funds:
+            by_official[official_key(nm)].append(cd)
         self.etf_by_name = {}
-        for isu_cd, isu_nm in krx_etfs:
-            if (m := self._match_etf(isu_nm, etf_funds)) is not None:
+        for isu_cd, isu_nm, official_nm in krx_etfs:
+            if official_nm and len(cds := by_official.get(official_key(official_nm), [])) == 1:
+                m = (cds[0], "etf_seibro")
+            else:
+                m = self._match_etf(isu_nm, etf_funds)
+            if m is not None:
                 self.etf_by_name[isu_nm.replace(" ", "")] = (isu_cd, *m)
 
     @staticmethod
@@ -205,9 +218,13 @@ LEFT JOIN krx k ON k.k = replace(a.item_nm, ' ', '')
 """
 
 
-def _krx_etfs(conn: psycopg.Connection, d: date) -> list[tuple[str, str]]:
+def _krx_etfs(conn: psycopg.Connection, d: date) -> list[tuple[str, str, str | None]]:
+    """기준일 직전 거래일의 KRX ETF (종목코드, 종목명, SEIBro 공식명). ISIN = KR7 + 종목코드 6자리 + 00 + 검증숫자"""
     return conn.execute(
-        "SELECT isu_cd, isu_nm FROM raw.krx_etf_daily WHERE bas_dd = (SELECT max(bas_dd) FROM raw.krx_etf_daily WHERE bas_dd <= %s)", (d,)
+        "SELECT e.isu_cd, e.isu_nm, s.fund_name FROM raw.krx_etf_daily e "
+        "LEFT JOIN raw.seibro_funds s ON s.isin LIKE 'KR7' || e.isu_cd || '%%' "
+        "WHERE e.bas_dd = (SELECT max(bas_dd) FROM raw.krx_etf_daily WHERE bas_dd <= %s)",
+        (d,),
     ).fetchall()
 
 
