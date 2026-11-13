@@ -86,7 +86,7 @@ jobs:
       분기마다 한 번 backfill 로 실행: 하루 상한을 다 쓰면 다음날 오전에 이어서, 큐가 빌 때까지 반복(분기당 약 10일). 저장: data/raw/kofia/kofia_holdings.db
     schedule: every_3_months
     enabled: true
-    assets: [kofia/fund_holdings, db/raw/kofia_holdings, db/raw/kofia_funds, db/extracted/kofia_fund_holdings]
+    assets: [kofia/fund_holdings, db/raw/kofia_holdings, db/raw/kofia_funds, db/extracted/kofia_fund_links, db/extracted/kofia_fund_holdings]
     config:
       kofia/fund_holdings: {command: backfill, target: all, budget: 1300, daily_cap: 1300, lookback_days: 100}
 
