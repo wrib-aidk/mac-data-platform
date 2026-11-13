@@ -96,6 +96,7 @@ asset 화면의 메타데이터에 **preview** 항목이 있습니다.
 
 - **증분 적재**: 파일 크기·수정시각을 `etl.loaded_files` 에 기록해 바뀐 파일만 그 단위(펀드·날짜)로 지우고 다시 넣습니다. 중간에 끊겨도 다음 실행 때 이어서 넣음.
 - 테이블 추가/변경: `sql/<다음 번호>_xxx.sql` **새 파일**을 추가 (다음 연결 때 번호 순으로 한 번만 실행). 기존 sql 파일은 고치지 않음
+- 컬럼 설명: `COMMENT ON COLUMN` 으로 넣습니다 (`sql/005_column_comments.sql`). 적재할 때 실제 데이터에서 예시값 1개를 붙여 asset 화면 **Columns** 에 `설명 · 예: 값` 으로 보입니다. 컬럼을 추가하면 같은 sql 파일에 설명도 같이 넣기
 - 접속: `docker compose exec postgres psql -U platform -d platform` 또는 DB 툴로 `127.0.0.1:5432`
 - 백업/이전: `./scripts/db_backup.sh dump` → 새 PC 에서 `docker compose up -d` 후 `./scripts/db_backup.sh restore <파일>`
 

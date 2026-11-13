@@ -75,15 +75,22 @@ def db_asset(schema: str, table: str, source: str, description: str, **kwargs: o
 
 
 def table_result(conn, table: str, stats: dict | None = None, order_by: str | None = None, **extra: object) -> dg.MaterializeResult:  # noqa: ANN001
-    """테이블 상태를 UI 메타데이터로: 행 수, 컬럼, 앞 5행 미리보기 + 적재 통계."""
+    """테이블 상태를 UI 메타데이터로: 행 수, 컬럼(설명·예시값), 앞 5행 미리보기 + 적재 통계."""
     from . import db
 
     cols = db.table_columns(conn, table)
+    comments = db.column_comments(conn, table)
+    examples = db.column_examples(conn, table, [c for c, _ in cols])
+
+    def describe(c: str) -> str | None:
+        parts = [comments.get(c), f"예: {examples[c]}" if c in examples else None]
+        return " · ".join(p for p in parts if p) or None
+
     return dg.MaterializeResult(
         metadata={
             **(stats or {}),
             "dagster/row_count": db.table_count(conn, table),
-            "dagster/column_schema": dg.TableSchema(columns=[dg.TableColumn(name=c, type=t) for c, t in cols]),
+            "dagster/column_schema": dg.TableSchema(columns=[dg.TableColumn(name=c, type=t, description=describe(c)) for c, t in cols]),
             "dagster/table_name": table,
             "preview": md_table(db.table_head(conn, table, order_by=order_by), max_cell=30),
             **extra,

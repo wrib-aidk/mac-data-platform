@@ -182,6 +182,28 @@ def table_columns(conn: psycopg.Connection, table: str) -> list[tuple[str, str]]
     ).fetchall()
 
 
+def column_comments(conn: psycopg.Connection, table: str) -> dict[str, str]:
+    """COMMENT ON COLUMN 으로 넣은 컬럼 설명 (sql/005_column_comments.sql)."""
+    rows = conn.execute(
+        "SELECT a.attname, col_description(a.attrelid, a.attnum) FROM pg_attribute a "
+        "WHERE a.attrelid = %s::regclass AND a.attnum > 0 AND NOT a.attisdropped",
+        (table,),
+    ).fetchall()
+    return {name: desc for name, desc in rows if desc}
+
+
+def column_examples(conn: psycopg.Connection, table: str, columns: Sequence[str], sample: int = 200, max_len: int = 80) -> dict[str, str]:
+    """컬럼별 예시값 1개: 앞 sample 행 중 처음으로 비어 있지 않은 값 (긴 값은 max_len 자에서 자름)."""
+    with conn.cursor(row_factory=dict_row) as cur:
+        rows = cur.execute(sql.SQL("SELECT * FROM {} LIMIT {}").format(_ident(table), sql.Literal(sample))).fetchall()
+    out = {}
+    for c in columns:
+        if (v := next((r[c] for r in rows if r.get(c) not in (None, "")), None)) is not None:
+            t = json.dumps(v, ensure_ascii=False, default=str) if isinstance(v, (dict, list)) else str(v)
+            out[c] = t if len(t) <= max_len else t[: max_len - 1] + "…"
+    return out
+
+
 def table_count(conn: psycopg.Connection, table: str) -> int:
     return conn.execute(sql.SQL("SELECT count(*) FROM {}").format(_ident(table))).fetchone()[0]
 

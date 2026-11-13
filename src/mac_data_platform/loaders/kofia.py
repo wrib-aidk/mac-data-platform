@@ -1,6 +1,7 @@
 """KOFIA → raw.kofia_fund_nav / raw.kofia_holdings / raw.kofia_funds"""
 
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 
 import psycopg
@@ -29,17 +30,26 @@ def load_nav(conn: psycopg.Connection, funds_dir: Path, *, log, force: bool = Fa
 
 
 def load_holdings(conn: psycopg.Connection, sqlite_path: Path, *, log, force: bool = False) -> dict:  # noqa: ANN001
-    """kofia_holdings.db 가 바뀌면 holdings·funds 를 통째로 다시 넣음 (분기당 수십만 행 수준이라 충분히 빠름)."""
+    """kofia_holdings.db 가 바뀌면 holdings 를 통째로 다시 넣음 (분기당 수십만 행 수준이라 충분히 빠름)."""
 
     def _one(conn: psycopg.Connection, p: Path) -> int:
-        src = sqlite3.connect(f"file:{p}?mode=ro", uri=True)
-        try:
-            n = db.replace_rows(conn, "raw.kofia_holdings", None, HOLDING_COLUMNS, src.execute(f"SELECT {', '.join(HOLDING_COLUMNS)} FROM holdings"))  # noqa: S608
+        with closing(sqlite3.connect(f"file:{p}?mode=ro", uri=True)) as src:
+            return db.replace_rows(conn, "raw.kofia_holdings", None, HOLDING_COLUMNS, src.execute(f"SELECT {', '.join(HOLDING_COLUMNS)} FROM holdings"))  # noqa: S608
+
+    return db.load_items(conn, "raw.kofia_holdings", _items(sqlite_path), _one, log=log, force=force)
+
+
+def load_funds(conn: psycopg.Connection, sqlite_path: Path, *, log, force: bool = False) -> dict:  # noqa: ANN001
+    """kofia_holdings.db 가 바뀌면 funds(펀드 목록)를 통째로 다시 넣음."""
+
+    def _one(conn: psycopg.Connection, p: Path) -> int:
+        with closing(sqlite3.connect(f"file:{p}?mode=ro", uri=True)) as src:
             cols = [c for c in FUND_COLUMNS if c in {r[1] for r in src.execute("PRAGMA table_info(funds)")}]  # 예전 DB 에는 is_class 가 없음
             funds = ([bool(v) if c in _BOOL and v is not None else v for c, v in zip(cols, r, strict=True)] for r in src.execute(f"SELECT {', '.join(cols)} FROM funds"))  # noqa: S608
-            db.replace_rows(conn, "raw.kofia_funds", None, cols, funds)
-        finally:
-            src.close()
-        return n
+            return db.replace_rows(conn, "raw.kofia_funds", None, cols, funds)
 
-    return db.load_items(conn, "raw.kofia_holdings", [(db.rel(sqlite_path), db.fingerprint(sqlite_path), sqlite_path)] if sqlite_path.exists() else [], _one, log=log, force=force)
+    return db.load_items(conn, "raw.kofia_funds", _items(sqlite_path), _one, log=log, force=force)
+
+
+def _items(sqlite_path: Path) -> list:
+    return [(db.rel(sqlite_path), db.fingerprint(sqlite_path), sqlite_path)] if sqlite_path.exists() else []

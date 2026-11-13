@@ -31,8 +31,9 @@ def kofia_fund_nav(context: dg.AssetExecutionContext, config: LoadConfig, postgr
     "kofia_holdings",
     "kofia",
     """
-    ### KOFIA 보유종목 (`raw.kofia_holdings`, `raw.kofia_funds`)
-    `kofia_holdings.db`(SQLite)의 `holdings`·`funds` 테이블을 그대로 옮깁니다. SQLite 파일이 바뀌면 통째로 교체.
+    ### KOFIA 보유종목 (`raw.kofia_holdings`)
+    `kofia_holdings.db`(SQLite)의 `holdings` 테이블을 그대로 옮깁니다. SQLite 파일이 바뀌면 통째로 교체.
+    펀드 1개 = 여러 행, 펀드 정보는 `raw.kofia_funds` 와 `standard_cd` 로 조인.
     (수집기의 이어받기 큐 `jobs`·`company_filings` 는 수집 관리용이라 SQLite 에만 둠)
     """,
     deps=[fund_holdings],
@@ -41,3 +42,20 @@ def kofia_holdings(context: dg.AssetExecutionContext, config: LoadConfig, postgr
     with postgres.connect() as conn:
         stats = load.load_holdings(conn, source_dir("kofia") / "kofia_holdings.db", log=context.log, force=config.force)
         return table_result(conn, "raw.kofia_holdings", stats, order_by="std_dt DESC, standard_cd, line_no")
+
+
+@db_asset(
+    "raw",
+    "kofia_funds",
+    "kofia",
+    """
+    ### KOFIA 펀드 목록 (`raw.kofia_funds`)
+    `kofia_holdings.db`(SQLite)의 `funds` 테이블을 그대로 옮깁니다. SQLite 파일이 바뀌면 통째로 교체.
+    영업보고서를 낸 운용사의 운용 중 펀드 전체(사모·클래스 포함). `is_etf`·`is_private`·`is_class` 로 수집 대상을 구분합니다.
+    """,
+    deps=[fund_holdings],
+)
+def kofia_funds(context: dg.AssetExecutionContext, config: LoadConfig, postgres: PostgresResource) -> dg.MaterializeResult:
+    with postgres.connect() as conn:
+        stats = load.load_funds(conn, source_dir("kofia") / "kofia_holdings.db", log=context.log, force=config.force)
+        return table_result(conn, "raw.kofia_funds", stats, order_by="standard_cd")
