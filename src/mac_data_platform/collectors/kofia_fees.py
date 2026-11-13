@@ -54,16 +54,52 @@ FEE_FIELDS = {
 }
 ETF_MARK = "상장지수"  # 펀드명에 들어 있으면 ETF
 
+# disdown.kofia.or.kr 은 서버 인증서만 보내고 중간 인증서를 빠뜨려서 검증이 실패한다
+# (CERTIFICATE_VERIFY_FAILED: unable to get local issuer certificate. 브라우저는 알아서 채움).
+# dis.kofia.or.kr 이 함께 보내는 공개 중간 인증서를 신뢰 목록에 더해 검증은 그대로 유지한다. 2028-11-21 만료.
+GLOBALSIGN_OV_CA_2018 = """-----BEGIN CERTIFICATE-----
+MIIETjCCAzagAwIBAgINAe5fIh38YjvUMzqFVzANBgkqhkiG9w0BAQsFADBMMSAw
+HgYDVQQLExdHbG9iYWxTaWduIFJvb3QgQ0EgLSBSMzETMBEGA1UEChMKR2xvYmFs
+U2lnbjETMBEGA1UEAxMKR2xvYmFsU2lnbjAeFw0xODExMjEwMDAwMDBaFw0yODEx
+MjEwMDAwMDBaMFAxCzAJBgNVBAYTAkJFMRkwFwYDVQQKExBHbG9iYWxTaWduIG52
+LXNhMSYwJAYDVQQDEx1HbG9iYWxTaWduIFJTQSBPViBTU0wgQ0EgMjAxODCCASIw
+DQYJKoZIhvcNAQEBBQADggEPADCCAQoCggEBAKdaydUMGCEAI9WXD+uu3Vxoa2uP
+UGATeoHLl+6OimGUSyZ59gSnKvuk2la77qCk8HuKf1UfR5NhDW5xUTolJAgvjOH3
+idaSz6+zpz8w7bXfIa7+9UQX/dhj2S/TgVprX9NHsKzyqzskeU8fxy7quRU6fBhM
+abO1IFkJXinDY+YuRluqlJBJDrnw9UqhCS98NE3QvADFBlV5Bs6i0BDxSEPouVq1
+lVW9MdIbPYa+oewNEtssmSStR8JvA+Z6cLVwzM0nLKWMjsIYPJLJLnNvBhBWk0Cq
+o8VS++XFBdZpaFwGue5RieGKDkFNm5KQConpFmvv73W+eka440eKHRwup08CAwEA
+AaOCASkwggElMA4GA1UdDwEB/wQEAwIBhjASBgNVHRMBAf8ECDAGAQH/AgEAMB0G
+A1UdDgQWBBT473/yzXhnqN5vjySNiPGHAwKz6zAfBgNVHSMEGDAWgBSP8Et/qC5F
+JK5NUPpjmove4t0bvDA+BggrBgEFBQcBAQQyMDAwLgYIKwYBBQUHMAGGImh0dHA6
+Ly9vY3NwMi5nbG9iYWxzaWduLmNvbS9yb290cjMwNgYDVR0fBC8wLTAroCmgJ4Yl
+aHR0cDovL2NybC5nbG9iYWxzaWduLmNvbS9yb290LXIzLmNybDBHBgNVHSAEQDA+
+MDwGBFUdIAAwNDAyBggrBgEFBQcCARYmaHR0cHM6Ly93d3cuZ2xvYmFsc2lnbi5j
+b20vcmVwb3NpdG9yeS8wDQYJKoZIhvcNAQELBQADggEBAJmQyC1fQorUC2bbmANz
+EdSIhlIoU4r7rd/9c446ZwTbw1MUcBQJfMPg+NccmBqixD7b6QDjynCy8SIwIVbb
+0615XoFYC20UgDX1b10d65pHBf9ZjQCxQNqQmJYaumxtf4z1s4DfjGRzNpZ5eWl0
+6r/4ngGPoJVpjemEuunl1Ig423g7mNA2eymw0lIYkN5SQwCuaifIFJ6GlazhgDEw
+fpolu4usBCOmmQDo8dIm7A9+O4orkjgTHY+GzYZSR+Y0fFukAj6KYXwidlNalFMz
+hriSqHKvoflShx8xpfywgVcvzfTO3PYkz6fiNJBonf6q8amaEsybwMbDqKWwIX7e
+SPY=
+-----END CERTIFICATE-----"""
+
 
 class Blocked(Exception):  # noqa: N818
     """KOFIA 가 403/429 로 막음. 재시도하지 않고 멈춘다."""
+
+
+class DisdownTLSAdapter(KofiaTLSAdapter):
+    def init_poolmanager(self, *args: object, **kwargs: object) -> None:
+        super().init_poolmanager(*args, **kwargs)
+        self.poolmanager.connection_pool_kw["ssl_context"].load_verify_locations(cadata=GLOBALSIGN_OV_CA_2018)
 
 
 def session() -> requests.Session:
     s = requests.Session()
     s.headers["User-Agent"] = "Mozilla/5.0"
     s.mount("https://dis.kofia.or.kr", KofiaTLSAdapter())
-    s.mount("https://disdown.kofia.or.kr", KofiaTLSAdapter())
+    s.mount("https://disdown.kofia.or.kr", DisdownTLSAdapter())
     return s
 
 
